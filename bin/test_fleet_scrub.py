@@ -142,7 +142,8 @@ class TestFalsePositivesArePinned(unittest.TestCase):
         self.assertEqual(n, 0)
 
     def test_a_key_that_is_an_identifier_is_untouched(self):
-        # Found on real data: 2026-10-07-globex-reader-coordination-handoff.md
+        # Found on real data: a coordination-handoff digest in the live corpus (its
+        # filename carries the private project's name, so it is not reproduced here)
         # lost its Figma FILE_KEY to the assignment rule.
         for text in ["FILE_KEY=abc123def456ghi789jkl",
                      "KEY_ID=abc123def456ghi789jkl",

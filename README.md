@@ -281,8 +281,23 @@ private vocabulary and absolute home paths, then runs each guard's own `--selfte
 probes `bin/pi-msg` with no broker reachable. Exit 0 is the only green:
 
 ```bash
-python3 tests/readiness.py --repo .
+python3 tests/readiness.py --repo .            # in a clone
 ```
+
+**If you installed this package instead of cloning it, run the same gate inside what you
+actually received** — the guard is only worth something if you can check it where you are:
+
+```bash
+# the path is wherever npm put it, usually:
+PKG=./node_modules/@rx3asarc/pi-fleet
+python3 "$PKG/tests/readiness.py" --repo "$PKG"
+```
+
+The tarball ships `tests/`, so that copy of the gate is the same gate, and the removal proof
+travelled with it: delete `$PKG/bin/fleet_serve.py` and the gate goes red under the id
+`serve-guard`, in your install, not just in ours. (An installed package cannot verify the
+things that live in a git checkout — the full suite under `bin/`, and the fixtures two suites
+need — so those stay a clone-only claim; this paragraph is the boundary, deliberately.)
 
 The kill/liveness path is **not** in that suite: its 15 node suites live outside this repo
 (`pi-live-tests`), so consider that path unmeasured here rather than covered — see

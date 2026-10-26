@@ -26,6 +26,8 @@
     "!bin/*.pyc",
     "!bin/test_*.py",
     "!bin/*.bak",
+    ".readiness-allow",
+    "tests/",
     "skills/",
     "docs/",
     "!docs/SCAFFOLD-NOTES.md",

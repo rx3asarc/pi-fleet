@@ -123,5 +123,46 @@ class TestDrift(unittest.TestCase):
         self.assertIsNone(fb.drift("/nonexistent", ""))
 
 
+class TestIssueAHandWrittenBrief(unittest.TestCase):
+    """A `--brief` file is a contract, so it must be issued like a rendered one.
+
+    Measured 2026-10-26: every --brief spawn recorded brief_sha="", so drift()
+    answered "nothing was issued" and the arm that detects a worker rewriting its
+    own contract never ran for the commonest briefing path.
+    """
+
+    def setUp(self):
+        self.p = Path("/tmp/fleet-brief-issue-test.md")
+
+    def tearDown(self):
+        self.p.unlink(missing_ok=True)
+
+    def test_a_written_brief_is_issued_with_its_sha(self):
+        self.p.write_text("# BRIEF\n\nDo the thing.\n")
+        issued = fb.issue(str(self.p))
+        self.assertEqual(issued, fb.sha(self.p.read_text()))
+        # the pair (path, sha) is what the row records, and it round-trips cleanly
+        self.assertIsNone(fb.drift(str(self.p), issued))
+
+    def test_an_edit_after_issue_is_drift(self):
+        self.p.write_text("# BRIEF\n\nDo the thing.\n")
+        issued = fb.issue(str(self.p))
+        self.p.write_text("# BRIEF\n\nDo the thing -- but the done-test is optional now.\n")
+        why = fb.drift(str(self.p), issued)
+        self.assertIsNotNone(why)
+        self.assertIn("rewrote its own contract", why)
+
+    def test_a_missing_brief_is_refused_not_silently_unhashed(self):
+        with self.assertRaises(ValueError) as ctx:
+            fb.issue("/nonexistent/BRIEF.md")
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_an_empty_brief_is_refused(self):
+        self.p.write_text("   \n\n")
+        with self.assertRaises(ValueError) as ctx:
+            fb.issue(str(self.p))
+        self.assertIn("empty", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

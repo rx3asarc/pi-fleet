@@ -110,8 +110,8 @@ class TestClosingAndRepair(SweepCase):
     def test_a_phantom_pid_key_merges_into_the_real_session_record(self):
         """`pid-<n>` is a key an old enrolment path invented, not an identity."""
         sid = "01a172c6-a523-73dc-9907-e076c651cc8e"
-        self.record(sid, name="engrane-ui-lead", unit="brief: ui lead")
-        self.record("pid-1461108", name="engrane-ui-lead",
+        self.record(sid, name="globex-ui-lead", unit="brief: ui lead")
+        self.record("pid-1461108", name="globex-ui-lead",
                     sessionId="pid-1461108", unit="")
         self.live = [{"sessionId": sid, "pid": 1461108}]
         self.alive_pids = {1461108}

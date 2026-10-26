@@ -142,7 +142,7 @@ class TestFalsePositivesArePinned(unittest.TestCase):
         self.assertEqual(n, 0)
 
     def test_a_key_that_is_an_identifier_is_untouched(self):
-        # Found on real data: 2026-10-07-engrane-reader-coordination-handoff.md
+        # Found on real data: 2026-10-07-globex-reader-coordination-handoff.md
         # lost its Figma FILE_KEY to the assignment rule.
         for text in ["FILE_KEY=abc123def456ghi789jkl",
                      "KEY_ID=abc123def456ghi789jkl",
@@ -191,7 +191,7 @@ class TestDigestStaysReadable(unittest.TestCase):
 
 - unit: deploy the keyword sync
 - session: 01a14a7b-c178-72c7-aff0-38e1692d1e1c
-- route: /root/nordisk/bin/sync.py (12 004 B)
+- route: /root/acme/bin/sync.py (12 004 B)
 
 ## What it said it did
 
@@ -203,7 +203,7 @@ and the fallback used ghp_{'b' * 36}. Cost 12,50 kr per run.
         # structure intact
         self.assertIn("# fleet-ads-1 — reaped", clean)
         self.assertIn("- session: 01a14a7b-c178-72c7-aff0-38e1692d1e1c", clean)
-        self.assertIn("/root/nordisk/bin/sync.py (12 004 B)", clean)
+        self.assertIn("/root/acme/bin/sync.py (12 004 B)", clean)
         self.assertIn("Pushed 41 negative keywords.", clean)
         self.assertIn("Cost 12,50 kr per run.", clean)
         self.assertIn("## What it said it did", clean)

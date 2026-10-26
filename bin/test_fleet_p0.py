@@ -76,8 +76,8 @@ def good_deps(**over):
 
 
 def child(**kw):
-    c = fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                               "engrane-main", "audit the citations appendix",
+    c = fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                               "globex-main", "audit the citations appendix",
                                NOW, transcript=None)
     c.update(kw)
     return c
@@ -236,10 +236,10 @@ class WorldStores(TempStores):
              "phase": "", "pending_ask": None, "context": "58%", "branch": None,
              "head": None, "merged": False, "worktree": None}]
         self.world.live_entries.append(
-            {"sessionId": PARENT_SID, "name": "engrane-main",
+            {"sessionId": PARENT_SID, "name": "globex-main",
              "alive": parent_alive, "reported": parent_reported,
              "pid": 5252 if parent_alive else None,
-             "session": "engrane-main", "pi_status": "", "phase": ""})
+             "session": "globex-main", "pi_status": "", "phase": ""})
         self.world.records = [{"sessionId": c["sessionId"],
                                "updatedAt": last_seen * 1000}]
         return c
@@ -700,8 +700,8 @@ class TestScanOrphans(WorldStores):
 # ── P1 end to end: the grace clock as _cascade actually runs it ─────────────
 class TestGraceInCascade(WorldStores):
     def silent_child(self):
-        return fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                                       "engrane-main", "audit appendix", NOW)
+        return fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                                       "globex-main", "audit appendix", NOW)
 
     def test_first_tick_notifies_and_arms_a_600s_grace(self):
         self.seed(self.silent_child(), alive=False, reported=False,
@@ -784,7 +784,7 @@ class TestGraceInCascade(WorldStores):
         c = dict(self.silent_child(), grace_until=NOW - 1,
                  review_sid="fleet-review-01a1dead")
         self.seed(c, alive=False, reported=False, parent_alive=False)
-        side = fleet_children.REVIEW_DIR / "engrane-citations.md"
+        side = fleet_children.REVIEW_DIR / "globex-citations.md"
         side.parent.mkdir(parents=True, exist_ok=True)
         side.write_text("# what happened\n\nthe appendix was half-audited\n")
         self.addCleanup(side.unlink)
@@ -848,7 +848,7 @@ class TestRevive(WorldStores):
     def test_revive_clears_the_closing_fields_and_keeps_the_evidence(self):
         self._save(self.closed_child())
         with quiet() as out:
-            rc = fleet_children.cmd_revive(args(name="engrane-citations"))
+            rc = fleet_children.cmd_revive(args(name="globex-citations"))
         # cmd_revive prints; it returns nothing (only cmd_scan answers with a code)
         self.assertIsNone(rc)
         self.assertIn("revived", out.getvalue())
@@ -871,7 +871,7 @@ class TestRevive(WorldStores):
         before = self.ledger.read_text()
         self._save(self.closed_child())
         with quiet():
-            fleet_children.cmd_revive(args(name="engrane-citations"))
+            fleet_children.cmd_revive(args(name="globex-citations"))
         after = self.ledger.read_text()
         self.assertTrue(after.startswith(before))      # append-only
         actions = self._ledger_actions()
@@ -881,7 +881,7 @@ class TestRevive(WorldStores):
     def test_a_revived_child_becomes_reapable_again(self):
         self._save(self.closed_child())
         with quiet():
-            fleet_children.cmd_revive(args(name="engrane-citations"))
+            fleet_children.cmd_revive(args(name="globex-citations"))
         action, why = fleet_lineage.verdict(
             self._reload(), facts(alive=False, reported=True), int(time.time()))
         self.assertEqual(action, fleet_lineage.REAP)
@@ -890,7 +890,7 @@ class TestRevive(WorldStores):
         # inspected here, so the check is stubbed to its passing outcome)
         # Still alive on the later tick: revive restores the record, and the
         # reap of a live child is a real close. A dead one is bookkeeping only.
-        self.world.live_entries = [{"sessionId": SID, "name": "engrane-citations",
+        self.world.live_entries = [{"sessionId": SID, "name": "globex-citations",
                                    "alive": True, "pid": 4242, "reported": True,
                                    "session": "dune-fork-1", "pi_status": "",
                                    "phase": "", "pending_ask": None,
@@ -914,7 +914,7 @@ class TestRevive(WorldStores):
                  last_notified="partner gone")
         self._save(c)
         with quiet():
-            fleet_children.cmd_revive(args(name="engrane-citations"))
+            fleet_children.cmd_revive(args(name="globex-citations"))
         self.assertIsNone(self._reload()["grace_until"])
         action, why = fleet_lineage.verdict(
             self._reload(), facts(alive=False, reported=False,
@@ -924,8 +924,8 @@ class TestRevive(WorldStores):
         self.assertIn("parent is gone too", why)
 
     def silent_child(self):
-        return fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                                      "engrane-main", "audit appendix", NOW)
+        return fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                                      "globex-main", "audit appendix", NOW)
 
     def test_revive_by_session_id_and_unit_override(self):
         self._save(self.closed_child())
@@ -945,7 +945,7 @@ class TestRevive(WorldStores):
         c = dict(self.closed_child(), checks={"status": "stale", "files": []})
         self._save(c)
         with quiet():
-            fleet_children.cmd_revive(args(name="engrane-citations"))
+            fleet_children.cmd_revive(args(name="globex-citations"))
         self.assertEqual(self._reload()["checks"], {"status": "stale",
                                                     "files": []})
         row = json.loads(self.ledger.read_text().splitlines()[-1])
@@ -963,11 +963,11 @@ class TestRevive(WorldStores):
     def test_reviving_an_unknown_name_dies(self):
         self._save(self.closed_child())
         with quiet():
-            fleet_children.cmd_dismiss(args(name="engrane-citations",
+            fleet_children.cmd_dismiss(args(name="globex-citations",
                                             note="human says done"))
         self.assertEqual(self._reload()["verdict"], "dismissed")
         with quiet():
-            fleet_children.cmd_revive(args(name="engrane-citations"))
+            fleet_children.cmd_revive(args(name="globex-citations"))
         rec = self._reload()
         self.assertIsNone(rec["verdict"])
         self.assertIsNone(rec["reaped_at"])
@@ -982,7 +982,7 @@ class TestVerifyBudget(WorldStores):
             c = fleet_lineage.record_claims(
                 fleet_lineage.mark_reported(
                     fleet_lineage.new_child(sid, f"worker-{i}", PARENT_SID,
-                                            "engrane-main", f"unit {i}", NOW),
+                                            "globex-main", f"unit {i}", NOW),
                     "done", NOW - 60),
                 files=[f"/a/{i}.py"])
             kids[sid] = dict(c, pid=4242, pid_start=PID_START)
@@ -1051,7 +1051,7 @@ class TestVerifyBudget(WorldStores):
         self.claim_children(1)
         free = fleet_lineage.new_child(
             "01a1c0de-0000-7000-9000-0000000000cc", "no-claims", PARENT_SID,
-            "engrane-main", "no checkable claim", NOW)
+            "globex-main", "no checkable claim", NOW)
         kids = json.loads(self.lineage_path.read_text())["children"]
         free = dict(fleet_lineage.mark_reported(free, "wrote prose only", NOW - 60),
                     pid=4242, pid_start=PID_START)
@@ -1119,7 +1119,7 @@ class TestBlockedClose(WorldStores):
         self.assertIsNotNone(self._reload()["blocked"])
 
         with quiet() as out:
-            rc = fleet_children.cmd_revive(args(name="engrane-citations"))
+            rc = fleet_children.cmd_revive(args(name="globex-citations"))
         self.assertIsNone(rc)                    # reviving prints, returns None
         self.assertIsNone(self._reload()["blocked"])
         self.assertIsNone(self._reload()["blocked_at"])

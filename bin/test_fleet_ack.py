@@ -11,7 +11,7 @@ the wrong thing was accomplished. Nothing is UNSURE.
 
 Two constraints collide and both are real: a fleet-wide mis-frame costs far more than
 one human round-trip, AND blocking an autonomous lead on a human is exactly how
-`nordisk-main` froze ~18h on 2026-10-15/16. The resolution under test is a BOUNDED
+`acme-main` froze ~18h on 2026-10-15/16. The resolution under test is a BOUNDED
 window whose expiry is recorded, never silently assumed.
 """
 import unittest

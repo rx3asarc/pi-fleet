@@ -40,9 +40,9 @@ class TestDomain(unittest.TestCase):
 
     def test_live_names_are_grouped_by_domain_prefix_not_by_fuzzy_match(self):
         self.assertEqual(
-            fd.live_in_domain(names("engrane-a-1", "engrane", "engineering-x-1",
-                                    "other-1"), "engrane"),
-            ["engrane", "engrane-a-1"])
+            fd.live_in_domain(names("globex-a-1", "globex", "engineering-x-1",
+                                    "other-1"), "globex"),
+            ["globex", "globex-a-1"])
 
 
 class TestDecide(unittest.TestCase):

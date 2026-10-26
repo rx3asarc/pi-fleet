@@ -20,8 +20,8 @@ import fleet_restore as R
 SID = "01a1c0de-dead-7000-9000-000000000001"
 PARENT = "01a1c0de-dead-7000-9000-0000000000ff"
 CHILD2 = "01a1c0de-dead-7000-9000-000000000002"
-PARENT_NAME = "engrane-main"
-NAME = "engrane-citations"
+PARENT_NAME = "globex-main"
+NAME = "globex-citations"
 
 
 def full_record(**kw):

@@ -179,12 +179,17 @@ fixed, because hiding an unmeasured edge is worse than admitting it.
 - **The kill/liveness path is UNMEASURED here, not green.** It is covered by 15 node suites
   that live outside this repo (`pi-live-tests`), so nothing in this README's test counts
   says anything about the most dangerous code path. Treat that part as unproven.
-- **A brief can be recorded without existing.** MEASURED 2026-10-26: three spawned units
-  carried `brief_path=…/BRIEF.md` with `brief_sha: ""` and **no file on disk**; each worked
-  from the lead's `plan.md` instead, and one had to re-render its own brief. The spawner
-  records the path it intends to write; the record is not proof the write happened. Until
-  this is fixed, treat a brief as evidence only when `test -s "$brief_path"` passes **and**
-  `brief_sha` is non-empty — otherwise you are trusting a contract nobody signed.
+- **A brief can be recorded without existing — fixed, and the shape of the bug is worth
+  keeping.** MEASURED 2026-10-26: three spawned units carried `brief_path=…/BRIEF.md` with
+  `brief_sha: ""` and **no file on disk**; each worked from the lead's `plan.md` instead, and
+  one re-rendered its own brief. The cause was narrower than it looked: a brief RENDERED from a
+  plan slice was hashed at issue, a brief HANDED to `--brief` was not hashed at all, and the
+  row was only patched on the rendered path. So `fleet_brief.drift()` answered "nothing was
+  issued" for the commonest way a worker gets briefed, and the check that catches a worker
+  rewriting its own contract never ran. Fixed: `fleet_brief.issue()` hashes the file at spawn,
+  missing and empty briefs are refused, and the row always carries `brief_path` **and**
+  `brief_sha` (verified end to end on a real spawn). Rows created before this fix still carry
+  `""` — for those, treat the brief as evidence only when `test -s "$brief_path"` passes too.
 - **A correct secret scan flags the scanner.** `bin/fleet_scrub.py` ships the pattern
   definitions, so the `secrets` check matches a file that is a detector rather than a leak —
   and `secrets` can never be allowlisted, deliberately, because a config file must not be able

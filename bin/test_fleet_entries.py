@@ -6,7 +6,7 @@ JSON (which is a fixture, not a reality source).
 RED first. This file was written before `fleet_entries.py` existed, so every
 test here failed with ModuleNotFoundError before the module was added.
 
-The load-bearing test is `TestEngraneByteIdentical`. The 7 engrane entries are
+The load-bearing test is `TestFrozenBaselineByteIdentical`. The 7 frozen entries are
 the only entries `fleet reap` has ever acted on, and `reap` deletes a git branch
 and a worktree. U4 rewrites discovery, so the guard is pinned BEFORE the change.
 """
@@ -19,20 +19,54 @@ from fleet_entries import build_entries
 import fleet_entries  # noqa: E402  (the private liveness helper is part of the contract now)
 
 FIXTURES = Path(__file__).parent / "fixtures"
-BASELINE = FIXTURES / "engrane_baseline_20261011.json"
+FIXTURES_DIR = Path(os.environ.get("FLEET_GATE_FIXTURES") or FIXTURES)
+
+# The date the baseline was frozen on. It is a fact about WHEN the snapshot was
+# taken, not private vocabulary: it is how the right file is found now that the
+# private project's name may not appear in this path.
+FROZEN_DATE = "20261011"
+
+
+def frozen_baseline(directory, shape):
+    """The frozen baseline, located by DATE + CONTENT SHAPE, not by its filename.
+
+    The file is a copy of ANOTHER PROJECT's real state, so the name it was saved
+    under carries that project's name, and the tree deliberately excludes it. Matching
+    on the frozen date and on the JSON shape (a list of entries here; an object of
+    refusals in test_fleet_gate) keeps this guard armable against the private
+    directory without a public file repeating the private vocabulary.
+
+    Nothing found -> a path that does not exist, so `FixturesNeeded` skips LOUDLY
+    rather than the guard passing because there was nothing to check.
+    """
+    absent = directory / ("frozen-baseline-%s.json" % FROZEN_DATE)
+    try:
+        candidates = sorted(directory.glob("*%s*.json" % FROZEN_DATE))
+    except OSError:
+        return absent
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if shape == "entries" and isinstance(data, list):
+            return path
+        if shape == "refusals" and isinstance(data, dict):
+            return path
+    return absent
+
+
+BASELINE = frozen_baseline(FIXTURES_DIR, "entries")
 
 FIXTURES_MISSING = (
     f"the frozen baseline is not in this tree ({BASELINE}). It is a copy of a PRIVATE "
     "project's 7 entries (session names, branches, heads), so it is excluded from the "
     "shipped repo on purpose: it is another project's state, not an example. The "
     "byte-identity guard is therefore unarmed here; copy the fixture out of the private "
-    "deployment's bin/fixtures/ (or point FLEET_GATE_FIXTURES at that directory) to arm "
-    "it. Skipped, not passed: nothing has been verified."
+    f"deployment's bin/fixtures/ (any *{FROZEN_DATE}*.json whose content is a JSON list "
+    "of entries) or point FLEET_GATE_FIXTURES at that directory, and re-run. "
+    "Skipped, not passed: nothing has been verified."
 )
-
-_elsewhere = os.environ.get("FLEET_GATE_FIXTURES")
-if _elsewhere:
-    BASELINE = Path(_elsewhere) / BASELINE.name
 
 
 class FixturesNeeded(unittest.TestCase):
@@ -43,10 +77,47 @@ class FixturesNeeded(unittest.TestCase):
             raise unittest.SkipTest(FIXTURES_MISSING)
 
 
-def engrane_namer(path):
-    """`derive_name` from fleet: strip the repo's own name prefix."""
+def globex_namer(path):
+    """Stand-in for fleet's `derive_name`: strip the `<repo>-` prefix of a fixture name.
+
+    Used by the tests that build synthetic names (`globex-citations` -> `citations`).
+    The byte-identity guard does NOT use this: it uses `baseline_namer`, which reads
+    the real prefix out of the frozen fixture instead of naming a private project here.
+    """
     stem = os.path.basename(path)
-    prefix = "engrane-"
+    prefix = "globex-"
+    return stem[len(prefix):] if stem.startswith(prefix) else stem
+
+
+def baseline_repo_prefix():
+    """The `<repo>-` prefix the frozen baseline was produced under.
+
+    Derived from the fixture, not written here: every entry carries both the worktree
+    it was read from and the name the fleet's namer derived from it, so the prefix is
+    the difference between the two basenames. That keeps the reconstruction faithful
+    whatever the private project is called, and keeps its name out of this file.
+
+    Derivation is checked, not assumed: an inconsistent fixture raises here rather
+    than producing a guard that compares the wrong names and reports a false pass.
+    """
+    prefixes = set()
+    for entry in json.loads(BASELINE.read_text()):
+        stem = os.path.basename(str(entry.get("worktree") or "").rstrip("/"))
+        name = str(entry.get("name") or "")
+        if not stem or not name or not stem.endswith("-" + name):
+            continue
+        prefixes.add(stem[: -len(name)])
+    if len(prefixes) != 1:
+        raise AssertionError(
+            "the frozen baseline does not state one repo prefix (saw %r); the "
+            "byte-identity guard cannot be reconstructed from it" % sorted(prefixes))
+    return prefixes.pop()
+
+
+def baseline_namer(path):
+    """`derive_name` as the frozen baseline was actually produced with."""
+    stem = os.path.basename(path)
+    prefix = baseline_repo_prefix()
     return stem[len(prefix):] if stem.startswith(prefix) else stem
 
 
@@ -70,7 +141,7 @@ def git_class_only(**kw):
     worktrees, facts = baseline_inputs()
     args = dict(rows=[], worktrees=worktrees, git_by_path=facts, status_by_session={},
                 context_by_session={}, registry={}, base="origin/main",
-                namer=engrane_namer)
+                namer=baseline_namer)
     args.update(kw)
     return build_entries(**args)
 
@@ -84,10 +155,10 @@ def row(session_id, name, cwd="/root", worktree=None, tmux=_UNSET, pid=None):
 
 
 # ── the regression guard ─────────────────────────────────────────────────────
-class TestEngraneByteIdentical(FixturesNeeded):
-    """The 7 engrane entries must not move, gain keys, or change order."""
+class TestFrozenBaselineByteIdentical(FixturesNeeded):
+    """The 7 frozen entries must not move, gain keys, or change order."""
 
-    def test_seven_engrane_entries_are_byte_identical(self):
+    def test_seven_frozen_entries_are_byte_identical(self):
         got = git_class_only()
         self.assertEqual(json.dumps(got, indent=2), BASELINE.read_text().rstrip("\n"))
 
@@ -110,20 +181,20 @@ class TestEngraneByteIdentical(FixturesNeeded):
 # ── enumerate beyond worktrees (the point of U4) ─────────────────────────────
 class TestEnumerateAll(unittest.TestCase):
     def test_a_session_with_no_worktree_becomes_an_entry(self):
-        got = build_entries(rows=[row("sid-1", "nordisk-goal-helper-2")],
+        got = build_entries(rows=[row("sid-1", "acme-goal-helper-2")],
                             worktrees=[], git_by_path={}, status_by_session={},
                             context_by_session={}, registry={}, base="origin/main",
-                            namer=engrane_namer)
+                            namer=globex_namer)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["sessionId"], "sid-1")
-        self.assertEqual(got[0]["name"], "nordisk-goal-helper-2")
+        self.assertEqual(got[0]["name"], "acme-goal-helper-2")
         self.assertIsNone(got[0]["worktree"])
 
     def test_the_swarm_appears_in_full(self):
-        rows = [row(f"sid-{i}", f"nordisk-goal-helper-{i}") for i in range(23)]
+        rows = [row(f"sid-{i}", f"acme-goal-helper-{i}") for i in range(23)]
         got = build_entries(rows=rows, worktrees=[], git_by_path={},
                             status_by_session={}, context_by_session={}, registry={},
-                            base="origin/main", namer=engrane_namer)
+                            base="origin/main", namer=globex_namer)
         self.assertEqual(len(got), 23)
 
     def test_a_worktree_backed_session_is_one_entry_not_two(self):
@@ -132,7 +203,7 @@ class TestEnumerateAll(unittest.TestCase):
         Two rows for one session is the duplicate-identity bug this whole
         protocol exists to remove.
         """
-        wt = "/mnt/HC_Volume_105587324/projects/engrane-citations"
+        wt = "/mnt/fleet-volume/projects/globex-citations"
         got = build_entries(
             rows=[row("sid-c", "citations", cwd=wt, worktree=wt)],
             worktrees=[{"path": wt, "branch": "fix/citations", "head": "abc1234"}],
@@ -141,7 +212,7 @@ class TestEnumerateAll(unittest.TestCase):
                                                 "ahead": 0, "unpushed": 0,
                                                 "merged": True}},
             status_by_session={}, context_by_session={}, registry={},
-            base="origin/main", namer=engrane_namer)
+            base="origin/main", namer=globex_namer)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["sessionId"], "sid-c")
         self.assertEqual(got[0]["branch"], "fix/citations")
@@ -150,7 +221,7 @@ class TestEnumerateAll(unittest.TestCase):
         got = build_entries(rows=[row("sid-1", "amber"), row("sid-2", "orphan", tmux=None)],
                             worktrees=[], git_by_path={}, status_by_session={},
                             context_by_session={}, registry={}, base="origin/main",
-                            namer=engrane_namer)
+                            namer=globex_namer)
         by_id = {e["sessionId"]: e for e in got}
         self.assertTrue(by_id["sid-1"]["alive"])
         self.assertFalse(by_id["sid-2"]["alive"])
@@ -163,7 +234,7 @@ class TestEnumerateAll(unittest.TestCase):
         got = build_entries(rows=[row("sid-1", "amber", tmux=None, pid=live_pid)],
                             worktrees=[], git_by_path={}, status_by_session={},
                             context_by_session={}, registry={}, base="origin/main",
-                            namer=engrane_namer)
+                            namer=globex_namer)
         self.assertTrue(got[0]["alive"])
 
     def test_unknown_is_not_reported_as_alive(self):
@@ -172,7 +243,7 @@ class TestEnumerateAll(unittest.TestCase):
         got = build_entries(rows=[row("sid-1", "amber", tmux=None, pid=None)],
                             worktrees=[], git_by_path={}, status_by_session={},
                             context_by_session={}, registry={}, base="origin/main",
-                            namer=engrane_namer)
+                            namer=globex_namer)
         self.assertFalse(got[0]["alive"])
         self.assertEqual(fleet_entries._liveness(None, {"pid": None}), "unknown")
 
@@ -184,7 +255,7 @@ class TestWiringGaps(unittest.TestCase):
         r.update(kw)
         got = build_entries(rows=[r], worktrees=[], git_by_path={},
                             status_by_session={}, context_by_session={}, registry={},
-                            base="origin/main", namer=engrane_namer)
+                            base="origin/main", namer=globex_namer)
         return got[0]
 
     def test_updated_at_is_carried_through(self):
@@ -228,7 +299,7 @@ class TestWiringGaps(unittest.TestCase):
             status_by_session={"sid-a": {"status": "idle", "model": "m-a"},
                                "sid-b": {"status": "tool:bash", "model": "m-b"}},
             context_by_session={}, registry={}, base="origin/main",
-            namer=engrane_namer)
+            namer=globex_namer)
         by_id = {e["sessionId"]: e for e in got}
         self.assertEqual(by_id["sid-a"]["pi_status"], "idle")
         self.assertEqual(by_id["sid-b"]["pi_status"], "tool:bash")
@@ -246,7 +317,7 @@ class TestShapeAndPurity(FixturesNeeded):
                             registry={os.path.realpath(target): {"name": "renamed",
                                                                  "reported": True,
                                                                  "note": "all good"}},
-                            base="origin/main", namer=engrane_namer)
+                            base="origin/main", namer=globex_namer)
         e = [x for x in got if x["worktree"] == target][0]
         self.assertEqual(e["name"], "renamed")
         self.assertTrue(e["reported"])
@@ -264,7 +335,7 @@ class TestShapeAndPurity(FixturesNeeded):
                             status_by_session={}, context_by_session={},
                             registry={"sid-1": {"name": "amber-renamed",
                                                 "reported": True, "note": "done"}},
-                            base="origin/main", namer=engrane_namer)
+                            base="origin/main", namer=globex_namer)
         self.assertEqual(got[0]["name"], "amber-renamed")
         self.assertTrue(got[0]["reported"])
         self.assertEqual(got[0]["note"], "done")
@@ -277,7 +348,7 @@ class TestShapeAndPurity(FixturesNeeded):
                             status_by_session={}, context_by_session={},
                             registry={os.path.realpath(target): {"name": "still-here",
                                                                  "reported": True}},
-                            base="origin/main", namer=engrane_namer)
+                            base="origin/main", namer=globex_namer)
         e = [x for x in got if x["worktree"] == target][0]
         self.assertEqual(e["name"], "still-here")
         self.assertTrue(e["reported"])
@@ -288,17 +359,17 @@ class TestShapeAndPurity(FixturesNeeded):
         before = json.dumps([rows, worktrees, facts], sort_keys=True)
         build_entries(rows=rows, worktrees=worktrees, git_by_path=facts,
                       status_by_session={}, context_by_session={}, registry={},
-                      base="origin/main", namer=engrane_namer)
+                      base="origin/main", namer=globex_namer)
         self.assertEqual(json.dumps([rows, worktrees, facts], sort_keys=True), before)
 
     def test_output_is_deterministic(self):
         rows = [row(f"sid-{i}", f"session-{i}") for i in range(5)]
         a = build_entries(rows=rows, worktrees=[], git_by_path={}, status_by_session={},
                           context_by_session={}, registry={}, base="origin/main",
-                          namer=engrane_namer)
+                          namer=globex_namer)
         b = build_entries(rows=list(reversed(rows)), worktrees=[], git_by_path={},
                           status_by_session={}, context_by_session={}, registry={},
-                          base="origin/main", namer=engrane_namer)
+                          base="origin/main", namer=globex_namer)
         self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(b, sort_keys=True))
 
 

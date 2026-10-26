@@ -6,7 +6,7 @@ is read, nothing is written.
 
 The over-limit case deliberately does NOT block. Blocking a spawn teaches people to
 work around the tool; a warning that names the sessions and identifies the one to
-retire keeps the tool honest and keeps the fleet from growing a fourth nordisk
+retire keeps the tool honest and keeps the fleet from growing a fourth acme
 session nobody meant to keep.
 """
 
@@ -20,6 +20,26 @@ import tempfile
 import unittest
 
 import pi_taxonomy
+
+# Same seam as test_pi_taxonomy: these fixtures name neutral projects (acme / globex),
+# and the accepted domain set is read from `FLEET_DOMAINS` at call time. Set for the
+# module and restored afterwards, so `KNOWN_DOMAINS` is never widened for a fixture.
+FIXTURE_DOMAINS = "acme,globex,initech,meta,infra"
+
+_PREVIOUS_DOMAINS = None
+
+
+def setUpModule():
+    global _PREVIOUS_DOMAINS
+    _PREVIOUS_DOMAINS = os.environ.get("FLEET_DOMAINS")
+    os.environ["FLEET_DOMAINS"] = FIXTURE_DOMAINS
+
+
+def tearDownModule():
+    if _PREVIOUS_DOMAINS is None:
+        os.environ.pop("FLEET_DOMAINS", None)
+    else:
+        os.environ["FLEET_DOMAINS"] = _PREVIOUS_DOMAINS
 
 
 def row(name, state="idle", updated_at=None, pending_ask=None):
@@ -38,13 +58,13 @@ class TestTheNameIsAcceptedOrRefused(unittest.TestCase):
         d = pi_taxonomy.validate_name("marrow")
         # The message must be usable by someone who has never read the spec.
         self.assertIn("-", d["error"])
-        self.assertIn("nordisk", d["error"])
+        self.assertIn("acme", d["error"])
 
     def test_a_scoped_name_is_accepted(self):
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01")
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01")
         self.assertTrue(d["ok"])
         self.assertIsNone(d["error"])
-        self.assertEqual(d["domain"], "nordisk")
+        self.assertEqual(d["domain"], "acme")
         self.assertEqual(d["topic"], "theme")
         self.assertEqual(d["subtopic"], "dup-create-01")
 
@@ -61,88 +81,88 @@ class TestTheNameIsAcceptedOrRefused(unittest.TestCase):
         self.assertFalse(pi_taxonomy.validate_name("")["ok"])
 
     def test_the_decision_is_pure(self):
-        rows = [row("nordisk-main")]
-        a = pi_taxonomy.validate_name("nordisk-storefront-01", rows)
-        b = pi_taxonomy.validate_name("nordisk-storefront-01", rows)
+        rows = [row("acme-main")]
+        a = pi_taxonomy.validate_name("acme-storefront-01", rows)
+        b = pi_taxonomy.validate_name("acme-storefront-01", rows)
         self.assertEqual(a, b)
 
 
 class TestTheWorkingLimitWarnsAndDoesNotBlock(unittest.TestCase):
     def setUp(self):
-        self.three = [row("nordisk-main", updated_at=300),
-                      row("nordisk-goal-helper-1", updated_at=200),
-                      row("nordisk-ads-audit", updated_at=100)]
+        self.three = [row("acme-main", updated_at=300),
+                      row("acme-goal-helper-1", updated_at=200),
+                      row("acme-ads-audit", updated_at=100)]
 
     def test_a_fourth_session_in_the_domain_still_spawns(self):
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", self.three)
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", self.three)
         self.assertTrue(d["ok"], "the limit must never hard-block a spawn")
         self.assertIsNone(d["error"])
 
     def test_the_warning_names_the_sessions_already_live(self):
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", self.three)
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", self.three)
         self.assertIsNotNone(d["warning"])
-        for name in ("nordisk-main", "nordisk-goal-helper-1", "nordisk-ads-audit"):
+        for name in ("acme-main", "acme-goal-helper-1", "acme-ads-audit"):
             self.assertIn(name, d["warning"])
 
     def test_the_oldest_idle_session_is_the_one_marked(self):
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", self.three)
-        self.assertEqual(d["accelerate"], "nordisk-ads-audit")
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", self.three)
+        self.assertEqual(d["accelerate"], "acme-ads-audit")
 
     def test_below_the_limit_there_is_no_warning(self):
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", self.three[:2])
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", self.three[:2])
         self.assertTrue(d["ok"])
         self.assertIsNone(d["warning"])
         self.assertIsNone(d["accelerate"])
 
     def test_the_limit_counts_only_the_same_domain(self):
-        other = [row("engrane-operations", updated_at=1),
-                 row("engrane-rowan", updated_at=2),
-                 row("engrane-citations", updated_at=3)]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", other)
+        other = [row("globex-operations", updated_at=1),
+                 row("globex-rowan", updated_at=2),
+                 row("globex-citations", updated_at=3)]
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", other)
         self.assertIsNone(d["warning"])
 
     def test_a_session_with_an_unresolved_ask_is_never_marked(self):
-        rows = self.three + [row("nordisk-waiting", updated_at=50,
+        rows = self.three + [row("acme-waiting", updated_at=50,
                                  pending_ask="which colour?")]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
-        self.assertNotEqual(d["accelerate"], "nordisk-waiting")
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
+        self.assertNotEqual(d["accelerate"], "acme-waiting")
 
     def test_a_working_session_is_not_marked_while_an_idle_one_exists(self):
         # Three live, so the limit IS exceeded: two busy, one idle. The busy ones
         # are never the answer even though one of them is older.
-        rows = [row("nordisk-busy", state="working", updated_at=1),
-                row("nordisk-also-busy", state="working", updated_at=2),
-                row("nordisk-calm", state="idle", updated_at=900)]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
+        rows = [row("acme-busy", state="working", updated_at=1),
+                row("acme-also-busy", state="working", updated_at=2),
+                row("acme-calm", state="idle", updated_at=900)]
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
         self.assertIsNotNone(d["warning"])
-        self.assertEqual(d["accelerate"], "nordisk-calm")
+        self.assertEqual(d["accelerate"], "acme-calm")
 
     def test_only_working_sessions_means_nothing_is_marked(self):
-        rows = [row("nordisk-a", state="working", updated_at=1),
-                row("nordisk-b", state="working", updated_at=2),
-                row("nordisk-c", state="working", updated_at=3)]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
+        rows = [row("acme-a", state="working", updated_at=1),
+                row("acme-b", state="working", updated_at=2),
+                row("acme-c", state="working", updated_at=3)]
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
         self.assertTrue(d["ok"])
         self.assertIsNotNone(d["warning"])
         self.assertIsNone(d["accelerate"],
                           "a busy fleet is a reason to warn, never a reason to kill")
 
     def test_an_unknown_state_is_not_treated_as_idle(self):
-        rows = [dict(row("nordisk-mystery", updated_at=1), state=None),
-                row("nordisk-a", state="working", updated_at=2),
-                row("nordisk-b", state="working", updated_at=3)]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
+        rows = [dict(row("acme-mystery", updated_at=1), state=None),
+                row("acme-a", state="working", updated_at=2),
+                row("acme-b", state="working", updated_at=3)]
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
         self.assertIsNone(d["accelerate"],
                           "unknown is not idle; never retire what we cannot read")
 
     def test_the_spawned_name_itself_is_not_counted_among_the_live(self):
-        rows = [row("nordisk-theme-dup-create-01", updated_at=1)]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
+        rows = [row("acme-theme-dup-create-01", updated_at=1)]
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
         self.assertIsNone(d["warning"])
 
     def test_a_row_with_no_name_is_ignored(self):
         rows = [{"name": None, "state": "idle"}, {"state": "idle"}]
-        d = pi_taxonomy.validate_name("nordisk-theme-dup-create-01", rows)
+        d = pi_taxonomy.validate_name("acme-theme-dup-create-01", rows)
         self.assertIsNone(d["warning"])
 
 
@@ -219,7 +239,7 @@ class TestTheAuditPathUsesTheSameContract(unittest.TestCase):
     """
 
     def test_unscoped_live_sessions_are_listed(self):
-        rows = [row("marrow"), row("nordisk-main")]
+        rows = [row("marrow"), row("acme-main")]
         a = pi_taxonomy.audit_names(rows)
         self.assertEqual(a["unscoped"], ["marrow"])
 
@@ -228,22 +248,22 @@ class TestTheAuditPathUsesTheSameContract(unittest.TestCase):
         # WORKING_LIMIT sessions and one more is asked for, so three live sessions
         # sit AT the limit and are not over it. The reported count is the domain's
         # own size -- an audit saying "3" while four run would be invisible-wrong.
-        rows = [row("nordisk-a", updated_at=1), row("nordisk-b", updated_at=2),
-                row("nordisk-c", updated_at=3), row("nordisk-d", updated_at=4)]
+        rows = [row("acme-a", updated_at=1), row("acme-b", updated_at=2),
+                row("acme-c", updated_at=3), row("acme-d", updated_at=4)]
         a = pi_taxonomy.audit_names(rows)
-        self.assertIn("nordisk", a["over_limit"])
-        self.assertEqual(a["over_limit"]["nordisk"]["live"], 4)
-        self.assertEqual(a["over_limit"]["nordisk"]["accelerate"], "nordisk-a")
+        self.assertIn("acme", a["over_limit"])
+        self.assertEqual(a["over_limit"]["acme"]["live"], 4)
+        self.assertEqual(a["over_limit"]["acme"]["accelerate"], "acme-a")
 
     def test_exactly_the_limit_is_not_over_it(self):
-        rows = [row("nordisk-a", updated_at=1), row("nordisk-b", updated_at=2),
-                row("nordisk-c", updated_at=3)]
+        rows = [row("acme-a", updated_at=1), row("acme-b", updated_at=2),
+                row("acme-c", updated_at=3)]
         a = pi_taxonomy.audit_names(rows)
         self.assertEqual(a["over_limit"], {},
                          f"{pi_taxonomy.WORKING_LIMIT} live is the limit, not over it")
 
     def test_a_domain_under_the_limit_is_not_reported(self):
-        a = pi_taxonomy.audit_names([row("nordisk-a"), row("nordisk-b")])
+        a = pi_taxonomy.audit_names([row("acme-a"), row("acme-b")])
         self.assertEqual(a["over_limit"], {})
 
     def test_an_empty_fleet_is_not_an_error(self):
@@ -255,13 +275,13 @@ class TestTheAuditPathUsesTheSameContract(unittest.TestCase):
         self.assertEqual(a["unscoped"], [])
 
     def test_the_same_domain_is_counted_once_not_once_per_session(self):
-        rows = [row("nordisk-a", updated_at=1), row("nordisk-b", updated_at=2),
-                row("nordisk-c", updated_at=3), row("nordisk-d", updated_at=4)]
+        rows = [row("acme-a", updated_at=1), row("acme-b", updated_at=2),
+                row("acme-c", updated_at=3), row("acme-d", updated_at=4)]
         a = pi_taxonomy.audit_names(rows)
         self.assertEqual(len(a["over_limit"]), 1)
 
     def test_the_audit_is_pure_and_order_stable(self):
-        rows = [row("marrow"), row("zephyr"), row("nordisk-a")]
+        rows = [row("marrow"), row("zephyr"), row("acme-a")]
         first = pi_taxonomy.audit_names(rows)
         second = pi_taxonomy.audit_names(rows)
         self.assertEqual(first, second)

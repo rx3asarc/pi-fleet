@@ -299,6 +299,13 @@ travelled with it: delete `$PKG/bin/fleet_serve.py` and the gate goes red under 
 things that live in a git checkout — the full suite under `bin/`, and the fixtures two suites
 need — so those stay a clone-only claim; this paragraph is the boundary, deliberately.)
 
+The frozen checks that gated this repo's own construction — one per unit, written *before*
+the code and never edited to fit it — live **outside** this repository, in the build
+workspace at `~/fleet/meta-lead/checks/check_u1.py … check_u10.py` (with `checks/fixtures/`).
+They are deliberately not shipped: they assert against live process records and state on the
+machine the tooling grew up on. If "every unit was gated by a lead-authored frozen test" is a
+claim you want to check rather than believe, that path is the address.
+
 The kill/liveness path is **not** in that suite: its 15 node suites live outside this repo
 (`pi-live-tests`), so consider that path unmeasured here rather than covered — see
 [Honest limits](#honest-limits).

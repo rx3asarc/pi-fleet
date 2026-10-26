@@ -81,7 +81,7 @@ GITIGNORE = "__pycache__/\n*.pyc\n*.bak*\n"
 ALL_CHECK_IDS = {
     "secrets", "vendored-binary", "backup-file", "pycache", "license", "readme",
     "package-manifest", "internal-vocab", "hardcoded-home", "toolchain-deps",
-    "guard-selftests", "intercom-dependency",
+    "guard-selftests", "serve-guard", "intercom-dependency",
 }
 
 # A fixture guard: it passes its own selftest ONLY when handed --selftest, which is how
@@ -97,6 +97,13 @@ sys.exit(0)
 '''
 
 GUARD_NAMES = ("fleet_pid_assert.py", "fleet_tmux_orphan_guard.py", "fleet_name_lint.py")
+
+# The serve guard is checked under its own id (its three failures are its own diseases),
+# so the fixture tree needs it too — but its real selftest starts servers, and a fixture
+# must stay fast and hermetic. A stub that honours --selftest is the honest fixture: what
+# is under test here is the GATE's wiring (does it call the tool, does it report the right
+# id), while the tool's own three cases are proved by the tool and by check_u9.py.
+SERVE_GUARD_NAMES = ("fleet_serve.py",)
 
 # A fixture pi-msg that behaves like the real one with no broker reachable: it fails, and
 # it says what to run. A stub that exits 0 would make the clean tree a lie.
@@ -126,7 +133,7 @@ def build_clean_tree(root):
     # pi-msg is not a plain fixture: with no broker reachable it must fail actionably,
     # because the gate probes exactly that failure.
     (root / "bin" / "pi-msg").write_text(PI_MSG_BROKERLESS_STUB, encoding="utf-8")
-    for guard in GUARD_NAMES:
+    for guard in GUARD_NAMES + SERVE_GUARD_NAMES:
         gpath = root / "bin" / guard
         gpath.write_text(GUARD_STUB, encoding="utf-8")
         gpath.chmod(0o755)
@@ -286,6 +293,28 @@ class GateTest(unittest.TestCase):
         rc, doc, out = run_gate(self.tree)
         self.assertEqual(rc, 1, "a missing guard must exit 1:\n%s" % out)
         self.assertIn("guard-selftests", finding_ids(doc))
+
+    def test_missing_serve_guard_is_caught_under_its_own_id(self):
+        # Removing the serve guard must FAIL the gate, under "serve-guard" and not
+        # merely "guard-selftests": the tool that catches a stale server is the only
+        # thing standing between an operator and a URL that answers with deleted
+        # content, so its absence is its own finding, not a footnote of another.
+        os.unlink(str(self.tree / "bin" / "fleet_serve.py"))
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a tree without the serve guard must not be READY:\n%s" % out)
+        self.assertIn("serve-guard", finding_ids(doc))
+
+    def test_serve_guard_selftest_failure_is_reported_with_its_output(self):
+        (self.tree / "bin" / "fleet_serve.py").write_text(
+            '#!/usr/bin/env python3\nimport sys\n'
+            'print("serve: a served directory was replaced and I did not notice",'
+            ' file=sys.stderr)\nsys.exit(1)\n', encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a red serve-guard selftest must exit 1:\n%s" % out)
+        detail = " ".join(f.get("detail", "") for f in doc["findings"]
+                          if f.get("id") == "serve-guard")
+        self.assertIn("replaced", detail,
+                      "the finding must carry the guard's own words, not a summary")
 
     def test_failing_guard_selftest_is_caught_and_reported_with_its_output(self):
         failing = ('#!/usr/bin/env python3\n'

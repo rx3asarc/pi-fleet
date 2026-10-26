@@ -83,6 +83,12 @@ CHECKS = (
      "each guard's OWN `--selftest` exits 0 when run as a subprocess "
      "(fleet_pid_assert, fleet_tmux_orphan_guard, fleet_name_lint) -- this gate "
      "calls them, it does not reimplement them"),
+    ("serve-guard",
+     "a served directory cannot masquerade: bin/fleet_serve.py records the served "
+     "directory's (st_dev, st_ino) with the pid and port, and its own `--selftest` "
+     "proves it catches a DELETED directory, a REPLACED directory at the same path, "
+     "and a DEAD pid whose port still answers -- run here as a subprocess, never "
+     "restated"),
     ("intercom-dependency",
      "the messaging broker pi-intercom is a DECLARED dependency (no worker can be "
      "messaged without it) and bin/pi-msg fails actionably, naming the install "
@@ -619,43 +625,43 @@ def check_toolchain_deps(root, files):
     return findings
 
 
-def check_guard_selftests(root):
-    """Run each guard's OWN test as a subprocess. Never restate its assertions.
+def _run_selftest(check_id, tool, root):
+    """Run one guard's OWN test as a subprocess. Never restate its assertions.
 
     A guard whose selftest is missing or red is a guard nobody can trust, and the
     failure is reported with the tool name and the tail of its output: "a guard
     failed" is not a finding a maintainer can act on.
     """
-    findings = []
+    rel = "bin/%s" % tool
+    path = os.path.join(root, "bin", tool)
+    if not os.path.isfile(path):
+        return [Finding(
+            check_id, rel,
+            "guard is missing from the package, so its selftest cannot run -- a guard "
+            "that is not shipped is not a guard")]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    try:
+        proc = subprocess.run(
+            [sys.executable, path, "--selftest"],
+            cwd=root, env=env, capture_output=True, text=True,
+            timeout=GUARD_SELFTEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return [Finding(check_id, rel,
+                        "--selftest did not finish in %ds" % GUARD_SELFTEST_TIMEOUT)]
+    except OSError as exc:
+        return [Finding(check_id, rel, "cannot run --selftest: %s" % exc)]
+    if proc.returncode != 0:
+        tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-3:]
+        return [Finding(check_id, rel,
+                        "%s --selftest exits %d: %s"
+                        % (tool, proc.returncode, " | ".join(tail)))]
+    return []
+
+
+def check_guard_selftests(root):
+    findings = []
     for tool in GUARDS:
-        rel = "bin/%s" % tool
-        path = os.path.join(root, "bin", tool)
-        if not os.path.isfile(path):
-            findings.append(Finding(
-                "guard-selftests", rel,
-                "guard is missing from the package, so its selftest cannot run -- a "
-                "guard that is not shipped is not a guard"))
-            continue
-        try:
-            proc = subprocess.run(
-                [sys.executable, path, "--selftest"],
-                cwd=root, env=env, capture_output=True, text=True,
-                timeout=GUARD_SELFTEST_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            findings.append(Finding(
-                "guard-selftests", rel,
-                "--selftest did not finish in %ds" % GUARD_SELFTEST_TIMEOUT))
-            continue
-        except OSError as exc:
-            findings.append(Finding("guard-selftests", rel,
-                                    "cannot run --selftest: %s" % exc))
-            continue
-        if proc.returncode != 0:
-            tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-3:]
-            findings.append(Finding(
-                "guard-selftests", rel,
-                "%s --selftest exits %d: %s" % (tool, proc.returncode, " | ".join(tail))))
+        findings.extend(_run_selftest("guard-selftests", tool, root))
     return findings
 
 
@@ -679,6 +685,17 @@ def _declared_dependencies(root):
         if isinstance(block, dict):
             deps.update(block)
     return deps
+
+
+def check_serve_guard(root):
+    """The serve guard proves itself, and this gate only asks it to.
+
+    Its three failures are DIFFERENT diseases with the same symptom ("the URL works"),
+    and a readiness gate that described them in prose without running them would be
+    the very thing this unit exists to stop: a claim about the world that nobody
+    re-checks.
+    """
+    return _run_selftest("serve-guard", "fleet_serve.py", root)
 
 
 def check_intercom_dependency(root):
@@ -810,6 +827,7 @@ def run_gate(root):
     raw += check_hardcoded_home(root, shipped)
     raw += check_toolchain_deps(root, all_files)
     raw += check_guard_selftests(root)
+    raw += check_serve_guard(root)
     raw += check_intercom_dependency(root)
 
     findings, suppressed = [], []

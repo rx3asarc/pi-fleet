@@ -146,3 +146,32 @@ measured suite state rather than promising a green one.
 What the suites here do **not** cover: the kill/liveness path is exercised by 15 node suites
 that live outside this repo (`pi-live-tests`). That coverage is UNMEASURED from inside
 `pi-fleet`, not green — see [../README.md](../README.md#honest-limits).
+
+## fleet_serve.py — a served directory cannot masquerade
+
+`fleet serve`'s cousin for anything a worker starts and a human then looks at. It records
+the served directory's IDENTITY — `(st_dev, st_ino)` plus the resolved path — with the pid,
+port and bind address, and `check` re-verifies every claim against `/proc/<pid>/cwd` and the
+filesystem.
+
+It exists because a path comparison is defeated by substitution:
+
+```
+mkdir /tmp/site                    # server starts here
+rm -rf /tmp/site && mkdir /tmp/site   # same path, DIFFERENT directory
+# "does the path exist?" says healthy. The server is answering from a deleted inode.
+```
+
+Measured on this box: four `python3 -m http.server` processes were alive with deleted cwds,
+one answering HTTP 200 on :8792 with stale content. `ps` was happy, the port answered, and
+the content no longer existed anywhere.
+
+Three failures it can tell apart, because they have one symptom ("the URL works") and three
+different causes: **deleted** (cwd unlinked), **replaced** (path exists, different
+`dev:ino` — the masquerade above), and **foreign** (recorded pid dead, port still answering
+— someone else owns the port). `--selftest` plants all three and is run by the readiness
+gate under the id `serve-guard`; the gate never restates the assertions.
+
+    bin/fleet_serve.py serve --dir /tmp/site --port 8792
+    bin/fleet_serve.py check --json        # exit 1 if any record is lying
+    bin/fleet_serve.py list | stop --all

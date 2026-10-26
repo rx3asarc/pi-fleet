@@ -179,6 +179,29 @@ fixed, because hiding an unmeasured edge is worse than admitting it.
 - **The kill/liveness path is UNMEASURED here, not green.** It is covered by 15 node suites
   that live outside this repo (`pi-live-tests`), so nothing in this README's test counts
   says anything about the most dangerous code path. Treat that part as unproven.
+- **A brief can be recorded without existing.** MEASURED 2026-10-26: three spawned units
+  carried `brief_path=…/BRIEF.md` with `brief_sha: ""` and **no file on disk**; each worked
+  from the lead's `plan.md` instead, and one had to re-render its own brief. The spawner
+  records the path it intends to write; the record is not proof the write happened. Until
+  this is fixed, treat a brief as evidence only when `test -s "$brief_path"` passes **and**
+  `brief_sha` is non-empty — otherwise you are trusting a contract nobody signed.
+- **A correct secret scan flags the scanner.** `bin/fleet_scrub.py` ships the pattern
+  definitions, so the `secrets` check matches a file that is a detector rather than a leak —
+  and `secrets` can never be allowlisted, deliberately, because a config file must not be able
+  to silence a credential. There is no detector-file exemption yet. Until there is, any tree
+  containing this repo will show that one finding, and the right response is a design decision
+  rather than a new allowlist line.
+- **The cap's decision is proven; its wiring is not.** The refuse/allow/override paths were
+  exercised against a synthetic lineage and a non-existent repo, so what is tested is the
+  decision `fleet_door` makes. No end-to-end spawn (real worktree, real tmux, real cap
+  interaction) was run as part of that test, so treat the wiring as unmeasured.
+- **The test suite has one non-hermetic test, and it is red on purpose.** `test_fleet_scrub`
+  asserts zero false positives over a live external corpus (a directory of operator handoff
+  notes, outside this repo). On the box of
+  writing that corpus contains a `NAME=value` assignment the rule correctly flags, so the test
+  fails there. The failure is the test doing its job; it is not allowlisted and the value is
+  not printed. On a clean machine with no such corpus the same test should be green — that is
+  what "clean machine" means here.
 - **The broker's own dependencies are outside our control.** `pi-intercom` declares none of
   its own, yet its CLI imports `tsx`; on the box we measured, `tsx` resolves because pi's
   npm tree hoists it. Whether that holds in a clean global install is unmeasured — if

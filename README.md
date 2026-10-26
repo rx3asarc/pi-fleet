@@ -95,8 +95,10 @@ PLAN
 The done-test above fails before the work and passes after it — that is the whole point of
 freezing it at spawn time rather than accepting the worker's word.
 
-Workers are named `<domain>-<role>-<n>`; keep at most five running in one domain so you
-can still read their reports.
+Workers are named after what they ARE (`audit-1`, `theme-dup-create-01`). The domain is
+a separate field — pass `--domain <d>` when you spawn — and `fleet` counts at most five
+live workers per domain from that field, refusing the sixth unless you pass `--over-cap`
+(which records the exception on the row).
 
 ## Reporting
 

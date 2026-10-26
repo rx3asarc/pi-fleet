@@ -263,6 +263,75 @@ def _tmux_name_for_cwd(cwd):
     return None, f"ambiguous: {len(hits)} panes report {cwd}"
 
 
+def _domain_load(domain, children=None):
+    """How many LIVE workers the given domain already has. Data, not a name parse.
+
+    FIELD FIRST, name prefix only for legacy rows (fleet_door.domain_of_record).
+    Counting one way here and another way in the door is how a cap comes to mean two
+    different numbers in two different places -- measured 2026-10-26: the door counted
+    5 and `fleet spawn` counted nothing, so spawning directly walked around the only
+    lock there was.
+
+    `children` is passed in so a test can supply rows instead of this box's live
+    state. A row counts as live when the world says its session is alive, or when the
+    row itself says so (`alive`); a closed row (verdict / closed_by / reaped_at) never
+    counts.
+    """
+    import fleet_door
+    children = (children if children is not None
+                else (load_lineage().get("children") or {}))
+    live_ids = _live_session_ids()
+    n = 0
+    for sid, r in (children or {}).items():
+        if not isinstance(r, dict):
+            continue
+        if r.get("verdict") or r.get("closed_by") or r.get("reaped_at"):
+            continue
+        if sid not in live_ids and not r.get("alive"):
+            continue
+        name = r.get("name")
+        if not name or fleet_door.is_coordinator(name):
+            continue
+        if fleet_door.record_in_domain(r, domain):
+            n += 1
+    return n
+
+
+def _live_session_ids():
+    """The session ids the WORLD says are alive. Empty when the probe fails.
+
+    Never guessed: an unreadable world yields an empty set, and the caller then falls
+    back to the row's own `alive` flag rather than inventing liveness.
+    """
+    try:
+        import fleet_ground_truth
+        return {sid for sid, row in
+                (fleet_ground_truth.truth_from(pi_sources) or {}).items()
+                if row.get("alive")}
+    except Exception:
+        return set()
+
+
+def _domain_patch(domain=None, name=""):
+    """The domain FIELDS a spawn records, and where the value came from.
+
+    Pure, so the contract is testable without creating a worktree, a tmux session or
+    a process:
+
+      --domain <d> given     {'domain': d, 'domain_source': 'spawn --domain'}
+      name still has a domain {'domain': d, 'domain_source': 'name prefix'}
+      neither                 {} -- no domain field is invented, so the cap does not
+                             count this worker against a domain nobody chose
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", str(domain or "").lower()).strip("-")[:24]
+    if slug:
+        return {"domain": slug, "domain_source": "spawn --domain"}
+    declared = pi_taxonomy.declared_domain(name)
+    if declared:
+        return {"domain": declared, "domain_source": "name prefix (legacy)"}
+    return {}
+
+
 def cmd_spawn(a):
     if not (a.brief or getattr(a, "plan", None)):
         die("--brief is required (or --plan with --unit, which renders the brief)")
@@ -284,12 +353,32 @@ def cmd_spawn(a):
     # The name is judged FIRST, before the fetch, before the worktree, before tmux.
     # A refusal that arrives after `git worktree add` leaves a stray worktree behind,
     # so the cheap check has to happen before the expensive one.
+    # THE NAME IS THE SUBJECT; THE DOMAIN IS A FIELD. `--domain` means the domain is
+    # DATA, so the name is free to be a subject and nothing else (`audit-1`) -- reading
+    # a domain out of the name as well would be the coupling this change removes.
+    _field_domain = getattr(a, "domain", None)
     decision = pi_taxonomy.validate_name(
-        a.name, live_rows(), unscoped=getattr(a, "unscoped", False))
+        a.name, live_rows(),
+        unscoped=bool(getattr(a, "unscoped", False)), domain=_field_domain)
     if not decision["ok"]:
         die(decision["error"])
-    if decision["warning"]:
+    if decision["warning"] and not _field_domain:
         print(f"  ! {decision['warning']}")
+    # THE CAP, COUNTED FROM THE FIELD (2026-10-26). Once the domain is a field it is a
+    # COUNT, and a count can refuse -- `fleet_door.CAP_PER_DOMAIN` (5) was enforced only
+    # in the door, so spawning directly walked around it. The override exists because a
+    # human may genuinely need six, and it RECORDS itself so the exception is visible.
+    _dom = _field_domain or decision.get("domain")
+    _cap_override = bool(getattr(a, "over_cap", False))
+    if _dom:
+        _slug = re.sub(r"[^a-z0-9]+", "-", str(_dom).lower()).strip("-")[:24]
+        import fleet_door
+        _verdict = fleet_door.cap_verdict(_slug, _domain_load(_slug),
+                                         over_cap=_cap_override)
+        if not _verdict["ok"]:
+            die(_verdict["why"])
+        if _verdict["why"]:
+            print(f"  ! {_verdict['why']}")
 
     repo = Path(a.repo).resolve() if a.repo else fleet_paths.require_repo()
     kind = getattr(a, "kind", "code")
@@ -451,6 +540,14 @@ def cmd_spawn(a):
     # onto the minted id instead of being left to describe someone else's session.
     ident = _session_pi_identity(session, cwd=str(worktree))
     patch = {"session_id": minted_sid, "identity_source": "spawn"}
+    # DOMAIN AS DATA. The cap is per domain, so the domain has to be a FIELD that a
+    # count can read: written here, from `--domain` when the spawner gave one, else
+    # from a name prefix that still carries one, else NOT AT ALL. A row with no domain
+    # field is a worker in no domain, which is legal -- what is not legal is inventing
+    # a domain for it and then counting the cap against a bucket nobody chose.
+    patch.update(_domain_patch(_field_domain, a.name))
+    if _cap_override and patch.get("domain"):
+        patch["domain_cap_override"] = True
     if ident:
         patch.update(pid=ident[0], pid_starttime=ident[1], started_at=ident[2])
     if transcript:
@@ -564,6 +661,20 @@ def cmd_for(a):
     live = live_rows()
     names = [r.get("name") for r in live if r.get("name")]
     held = [(r.get("name"), r.get("sessionId")) for r in live if r.get("name")]
+    # The cap is counted from the `domain` FIELD, so the door needs the ROWS, not just
+    # the names. A live row's domain comes from its lineage record (field first, name
+    # prefix for legacy rows); a session with no record has no domain, and inventing
+    # one is exactly what this change removes.
+    live_sids = {r.get("sessionId") for r in live if r.get("sessionId")}
+    try:
+        kids = load_lineage().get("children") or {}
+    except Exception:
+        kids = {}
+    live_records = [dict(r, alive=True) for sid, r in kids.items()
+                    if isinstance(r, dict) and r.get("name")
+                    and not (r.get("verdict") or r.get("closed_by")
+                             or r.get("reaped_at"))
+                    and (sid in live_sids or r.get("alive"))]
     me = _self_session_id()
     parent_is_child = False
     if me:
@@ -576,7 +687,9 @@ def cmd_for(a):
     dec = fleet_door.decide(a.task, names, held, domain=getattr(a, "domain", None),
                             kind=getattr(a, "kind", "code"),
                             workers=getattr(a, "workers", None),
-                            parent_is_child=parent_is_child)
+                            parent_is_child=parent_is_child,
+                            live_records=live_records,
+                            over_cap=bool(getattr(a, "over_cap", False)))
     if not dec["ok"]:
         die(dec["why"])
     brief_text = fleet_door.manager_brief(
@@ -586,7 +699,9 @@ def cmd_for(a):
     scratch.mkdir(parents=True, exist_ok=True)
     brief = scratch / "BRIEF.md"
     brief.write_text(brief_text)
-    print(f"  door    : {dec['lead']}  (domain {dec['domain']}, "
+    # The label, not the bare slug: a domain the door derived from the task text is
+    # shown as `inferred:<d>` everywhere a human can see it.
+    print(f"  door    : {dec['lead']}  (domain {dec.get('domain_label', dec['domain'])}, "
           f"{dec['workers_now']}/{dec['workers_allowed']} workers live)")
     print(f"  brief   : {brief}")
     if getattr(a, "dry_run", False):
@@ -597,6 +712,13 @@ def cmd_for(a):
     cmd = ["fleet", "spawn", dec["lead"], "--brief", str(brief),
            "--kind", dec["kind"] if dec["kind"] == "task" else "code",
            "--task", a.task]
+    # Only a domain the CALLER chose travels into the spawn as a field. An inferred
+    # one stays inferred, so the cap cannot count this fleet against a domain the
+    # caller never opened.
+    if not dec.get("domain_inferred"):
+        cmd += ["--domain", dec["domain"]]
+    if dec.get("domain_cap_override"):
+        cmd += ["--over-cap"]
     if getattr(a, "repo", None):
         cmd += ["--repo", a.repo]
     if getattr(a, "model", None):
@@ -611,8 +733,36 @@ def cmd_for(a):
     return 0
 
 
+def _domain_labels():
+    """{sessionId: domain label} from the lineage rows, for `fleet list`.
+
+    A domain is only useful as a FIELD if a human can SEE it. Inferred domains are
+    shown with their prefix, so a derived bucket never looks like a chosen one.
+    """
+    try:
+        kids = load_lineage().get("children") or {}
+    except Exception:
+        return {}
+    out = {}
+    for sid, r in kids.items():
+        if not isinstance(r, dict):
+            continue
+        dom = str(r.get("domain") or "").strip()
+        if dom:
+            out[sid] = dom
+        else:
+            got = pi_taxonomy.declared_domain(r.get("name") or "")
+            if got:
+                out[sid] = got + " (name)"
+    return out
+
+
 def cmd_list(a):
     es = entries()
+    labels = _domain_labels()
+    for e in es:
+        if e.get("sessionId") in labels:
+            e["domain"] = labels[e["sessionId"]]
     if a.json:
         print(json.dumps(es, indent=2))
         return 0
@@ -620,7 +770,8 @@ def cmd_list(a):
         print("  no fleets. spawn one:  fleet spawn <name> --brief <file>")
         return 0
 
-    hdr = f"{'name':<24}{'state':<14}{'branch':<30}{'head':<9}{'+/-':<8}{'ctx':<12}{'merged':<7}"
+    hdr = (f"{'name':<24}{'domain':<16}{'state':<14}{'branch':<30}{'head':<9}"
+           f"{'+/-':<8}{'ctx':<12}{'merged':<7}")
     print(hdr)
     print("-" * len(hdr))
     for e in es:
@@ -629,13 +780,15 @@ def cmd_list(a):
         if dirty:
             ah += f" *{dirty}"
         state = "dead" if not e["alive"] else (e.get("pi_status") or "?")
-        print(f"{clip(e['name'], 24):<24}{clip(state, 14):<14}"
+        print(f"{clip(e['name'], 24):<24}{clip(e.get('domain') or '-', 16):<16}"
+              f"{clip(state, 14):<14}"
               f"{clip(e.get('branch') or '-', 30):<30}"
               f"{clip(e.get('head') or '-', 9):<9}{ah:<8}"
               f"{clip(e.get('context') or '-', 12):<12}"
               f"{('yes' if e.get('merged') else 'no'):<7}")
     print("\n  +/-  = commits ahead of base / unpushed   *N = uncommitted files")
     print("  ctx  = context used / window            merged = HEAD in base")
+    print("  domain = the FIELD the cap counts, or '-' when none was recorded")
     return 0
 
 
@@ -1083,7 +1236,14 @@ def main():
     s.add_argument("--branch")
     s.add_argument("--model")
     s.add_argument("--unscoped", action="store_true",
-                   help="spawn with a name that declares no domain")
+                   help="spawn with a name that states no subject (a bare word)")
+    s.add_argument("--domain", default=None, metavar="D",
+                   help="the domain as a FIELD on the lineage row (the name is the "
+                        "subject and need not carry one). The 5-worker cap is "
+                        "counted from this field.")
+    s.add_argument("--over-cap", action="store_true",
+                   help="spawn even when the domain is at the cap; the exception is "
+                        "recorded as domain_cap_override on the row, never silent")
     s.add_argument("--plan", metavar="PLAN.md",
                    help="the lead's plan; the brief is rendered from ONE unit slice so "
                         "a worker cannot be briefed on another unit's business")
@@ -1216,7 +1376,11 @@ def main():
 
     s = sub.add_parser("for", help='open a fleet for a task: fleet for "<task>"')
     s.add_argument("task", help="the task, as the human phrased it (quoted verbatim)")
-    s.add_argument("--domain", default=None)
+    s.add_argument("--domain", default=None,
+                   help="the domain as a FIELD (not a name prefix). Omitted = derived "
+                        "from the task and recorded as inferred:<d>")
+    s.add_argument("--over-cap", action="store_true",
+                   help="open the fleet even at the cap; the exception is recorded")
     s.add_argument("--kind", choices=("code", "task"), default="task")
     s.add_argument("--repo", default=None)
     s.add_argument("--workers", type=int, default=None, help="override the cap")

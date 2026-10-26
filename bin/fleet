@@ -22,7 +22,7 @@ WHAT IT COVERS  (read this before trusting it)
             decide that work is *correct*, or reap on a timer.
   KEYS ON : the WORKTREE PATH, never the tmux session name and never a state
             file. A session name is a label a human can change at any moment
-            (observed: `engrane-try-section` -> `engrane-try-section-zephyr`
+            (observed: `theme-try-section` -> `theme-try-section-zephyr`
             between two `tmux ls` calls). Everything is re-derived from tmux +
             git on every run, so nothing here can go stale.
 

@@ -157,8 +157,8 @@ def bare_tmux_shells(sources: dict) -> list:
     """tmux sessions with no pi in them: no identity, so not index rows.
 
     Surfaced separately, and counted, because they are real tmux sessions that
-    would otherwise look like missing sessions. (Observed live: engrane-review-main,
-    engrane-review-falsifier, hermes, pi.)
+    would otherwise look like missing sessions. (Observed live: review-main,
+    review-falsifier, hermes, pi.)
     """
     live_pids = {r.get("pid") for r in ((sources or {}).get("live") or [])
                  if r.get("sessionId")}

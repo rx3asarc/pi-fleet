@@ -12,7 +12,7 @@ Two constraints pull against each other and both are real:
 
   * A fleet-wide mis-frame costs far more than one human round-trip, so there must be a
     gate.
-  * Blocking an autonomous lead on a human is exactly how `nordisk-main` froze for ~18h
+  * Blocking an autonomous lead on a human is exactly how one lead session froze for ~18h
     on 2026-10-15/16 on a UI selector whose conservative answer was going to be taken
     anyway.
 

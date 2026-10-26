@@ -18,7 +18,7 @@ and this module refuses to run unconfigured rather than guessing.
 SAFETY CONTRACT (unchanged by the move)
   * `safe_close` resolves the pane that owns THIS sessionId. `pi-tmux --close`
     alone resolves `list-panes | head -1`, which kills a fork's parent
-    (measured 2026-10-17, dune:0.1 / nordisk-ads:0.1).
+    (measured 2026-10-17, two live leads at 0.1 each).
   * a reap is gated by fleet_gate before anything is signalled; the verdict is
     only a proposal.
   * the digest is written once and never rewritten, so a repeated tick cannot
@@ -423,8 +423,8 @@ def safe_close(sid, tmux_session, wait_s=5.0):
 
     `pi-tmux --close <session>` resolves the victim with `list-panes | head -1`,
     which for a fork sharing its parent's tmux session resolves to the PARENT and
-    then tears the whole session down. Measured 2026-10-17 on dune:0.1 and
-    nordisk-ads:0.1. So: resolve the pane that owns this sessionId and kill that
+    then tears the whole session down. Measured 2026-10-17 on two live leads at
+    0.1 each. So: resolve the pane that owns this sessionId and kill that
     pane only.
     """
     import time as _t
@@ -739,7 +739,7 @@ def verify_claims(rec, timeout=120):
             # the operator's home, which manufactured a FALSE RED: `python3 scripts/build_css.py`
             # then fails with "can't open file '<home>/scripts/build_css.py'" and the
             # rollup reports FAILED for a unit that was never run where it lives
-            # (measured 2026-10-26 on engrane-essay-reflist-1). A check that cannot be
+            # (measured 2026-10-26 on a live worker). A check that cannot be
             # run is reported as UNRUN, never as a failure.
             cwd = rec.get("worktree") or rec.get("repo")
             if not (cwd and os.path.isdir(cwd)):
@@ -1168,8 +1168,8 @@ def cmd_adopt(a):
         if kind == "ok" and start is not None:
             rec["pid"], rec["pid_start"] = int(e["pid"]), start
     # A RECORD'S NAME IS AN ATTRIBUTE, NOT AN IDENTITY -- and it can be wrong.
-    # Measured 2026-10-26: session 01a17833-cd35 was stored as `engrane-essay-liveness-1`
-    # while its evidence files were `engrane-reflist-1-*`; the posthumous scan had written
+    # Measured 2026-10-26: session 01a17833-cd35 was stored as `theme-essay-liveness-1`
+    # while its evidence files were `theme-reflist-1-*`; the posthumous scan had written
     # a name from the tmux name registry, which by then belonged to a different session.
     # A rollup that prints the stored name labels the wrong unit. `--relabel` sets the
     # name to the one the caller resolved by sessionId and KEEPS the old one, so the

@@ -105,7 +105,7 @@ def ownership_provider(e, accept_silent=False, base=DEFAULT_BASE):
     """Refuse unless ownership of the tmux session has been PROVEN.
 
     Silent when the entry names no tmux session: there is nothing to kill, so
-    there is no ownership question. That is what keeps the 7 engrane entries
+    there is no ownership question. That is what keeps the 7 baseline entries
     (all `session: null`) byte-identical -- none of them has a session to own.
 
     An empty or absent `owner_tmux` is NOT agreement. A caller that never asked

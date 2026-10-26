@@ -39,8 +39,8 @@ __all__ = ["resolve", "validate_name", "audit_names", "WORKING_LIMIT",
            "declared_domain", "looks_like_a_subject"]
 
 # Directories that say nothing about what a session is about. `/root` is the
-# important one: Maestro always works there, which is exactly why every session
-# in it falls through to the random-word branch of the namer.
+# important one: it is where the operator always works, which is exactly why
+# every session in it falls through to the random-word branch of the namer.
 GENERIC_DIRS = frozenset({
     "root", "home", "usr", "tmp", "var", "opt", "etc", "mnt", "srv", "bin",
     "lib", "proc", "sys", "dev", "run", "app", "code", "src", "workspace",

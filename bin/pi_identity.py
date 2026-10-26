@@ -9,7 +9,7 @@ that holds until the first hurried change.
 THE CORE INSIGHT, MEASURED RATHER THAN ASSUMED
 The identity store already holds the pi name, NOT the drifted tmux name:
 `session-names/01a116b1-...json` reads `name: "plover-wren"` while tmux still calls
-that session `engrane-rowan`. So the 5 known-drifted sessions need no repair at all
+that session `theme-rowan`. So the 5 known-drifted sessions need no repair at all
 -- the drift lives between tmux and pi, U2 reconciles it, and U3 reports it as a
 health metric.
 

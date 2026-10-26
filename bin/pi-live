@@ -46,8 +46,9 @@ const os = require("node:os");
 const HOME = process.env.HOME || os.homedir();
 // Find the core next to THIS script first, under $HOME second.
 //
-// `$HOME/.pi/agent/...` looked equivalent because on Maestro's box the two are the
-// same tree — but the script ships beside the core, and resolving the code through
+// `$HOME/.pi/agent/...` looked equivalent because on the box this grew up on the
+// two are the same tree — but the script ships beside the core, and resolving the
+// code through
 // the data directory meant a caller with a different HOME (a hermetic test, a
 // sandbox, an `sudo -H`) could not load the module at all: "cannot load the
 // liveness core". The data it prints still comes from $HOME; only the code is

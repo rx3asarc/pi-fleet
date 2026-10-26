@@ -10,7 +10,7 @@ WHY THIS EXISTS
   number that actually needs attention is at the top.
 
 THE STATE VOCABULARY (drives the sort)
-  needs-you   a pending ask addressed to Maestro          <- ALWAYS first
+  needs-you   a pending ask addressed to the operator     <- ALWAYS first
   working     currently inside a tool call
   exhausted   ctx >= 90% -- cannot carry another unit; must be harvested
   harvestable holds unpushed commits

@@ -1,4 +1,5 @@
-# Scaffold notes — what was copied out of `/root/.pi/agent/bin`, and what was not
+# Scaffold notes — what was copied out of this box's live tooling directory, and
+# what was not
 
 Written by the scaffold unit (U2). The source directory is the LIVE tooling on the
 build box and was treated as read-only: every file below was copied, never moved or
@@ -64,7 +65,7 @@ auditable, not asserted.
 | `probe-dead-parent.sh` | 7686 | **exclude** | one-off investigation probe (dead parent pids), not a product command |
 | `probe-spawn-lineage.sh` | 4335 | **exclude** | one-off investigation probe (spawn lineage), not a product command |
 | `respawn-pi-session` | 16770 | **exclude** | spawn helper hardcoded to this box's $HOME/.pi/agent/bin; excluded from the public snapshot — see Known breakage |
-| `spawn-parked-session.sh` | 5180 | **exclude** | detached-spawn helper hardcoded to /root/.pi/agent/bin; excluded — see Known breakage |
+| `spawn-parked-session.sh` | 5180 | **exclude** | detached-spawn helper hardcoded to this box's `$HOME/.pi/agent/bin`; excluded — see Known breakage |
 | `test_fleet_ack.py` | 3332 | **include** | suite for the shipped fleet_ack.py |
 | `test_fleet_audit.py` | 24250 | **include** | suite for the shipped fleet_audit.py |
 | `test_fleet_brief.py` | 4848 | **include** | suite for the shipped fleet_brief.py |
@@ -107,12 +108,13 @@ Totals: **69 included** (+1 from `/root/bin`), **18 excluded**, 87 files classif
 
 | dir | decision | reason |
 |---|---|---|
-| `fixtures/` | **exclude** | real session state from this box (`engrane_baseline_20261011.json`, `engrane_gate_baseline_20261011.json`) — internal data, and it is what two suites read; see Known breakage |
+| `fixtures/` | **exclude** | real session state from this box (`<repo>_baseline_<date>.json`, `<repo>_gate_baseline_<date>.json`) — internal data, and it is what two suites read; see Known breakage |
 | `__pycache__/` | **exclude** | build artefact (`.gitignore`d) |
 
 ## Measured facts about the included files
 
-Measured on the copy with `grep -c '/root/'` and a vocabulary scan (`nordisk|engrane|enc1|maestro|HC_Volume_105587324|.nordisk`). These are the raw
+Measured on the copy with `grep -cE '/(root|Users|home)/'` and a vocabulary scan (the term list is in
+`tests/readiness.py`). These are the raw
 numbers a readiness checker will trip over; recording them here so no later unit has
 to guess.
 

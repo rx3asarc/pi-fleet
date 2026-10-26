@@ -162,7 +162,8 @@ until the fixtures question is settled.
    gate; do not publish on an opinion).
 2. `npm pack --dry-run` file list matches section 1 — no secrets, no `fd`, no `.bak`, no
    `__pycache__`, no state.
-3. `grep -rl '/root/' bin/` returns nothing except the module that owns path resolution.
+3. `grep -rlE '/(root|Users|home)/' bin/` returns nothing except the module that owns
+   path resolution.
 4. No internal project vocabulary in shipped files — the term list is in
    `docs/SCAFFOLD-NOTES.md`, which is deliberately not shipped.
 5. `LICENSE` present, `README.md` renders, `version` is `0.1.0` in `package.json`.

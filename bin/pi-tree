@@ -7,7 +7,7 @@
   pi-tree --sort=state       flat triage list: needs-you first, then working,
                              exhausted, harvestable, idle
   pi-tree --sort=age         the reaping queue: oldest activity first
-  pi-tree --domain=nordisk   filter to one domain (any --sort still applies)
+  pi-tree --domain=web       filter to one domain (any --sort still applies)
   pi-tree --drift            only the sessions whose tmux name and pi name differ
 
 WHY THE VERBS ARE HERE (U10)

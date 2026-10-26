@@ -74,19 +74,27 @@ def live_pis():
     return out
 
 
+# WORKTREE PREFIXES THIS BOX REPAIRS (see .readiness-allow): a worktree is
+# `<repo>-<session>`, and the repo names below are local. Adding a candidate is safe;
+# REMOVING one silently un-matches live sessions, which is the failure this list
+# exists to stop, so it is data rather than a swallowed first segment.
+NAME_STRIP_PREFIXES = ("engrane-", "engrane-engrane-", "design-catalog-site-",
+                       "scratch-")
+
+
 def name_candidates(proc):
     """A live process can be named by its taxonomy or by its worktree.
 
     Worktrees are `<repo>-<session name>`, and the repo is often itself called
-    `engrane`, so `engrane-engrane-essay-quality-1` is session
-    `engrane-essay-quality-1`. Both strip depths are offered rather than one:
+    `theme`, so `theme-theme-essay-quality-1` is session
+    `theme-essay-quality-1`. Both strip depths are offered rather than one:
     guessing a single prefix is how the name path silently stopped matching.
     """
     names = set()
     if proc["taxonomy"]:
         names.add(proc["taxonomy"].replace("/", "-"))
     base = os.path.basename(proc["cwd"].rstrip("/"))
-    for prefix in ("engrane-", "engrane-engrane-", "design-catalog-site-", "scratch-"):
+    for prefix in NAME_STRIP_PREFIXES:
         if base.startswith(prefix) and len(base) > len(prefix):
             names.add(base[len(prefix):])
     return names

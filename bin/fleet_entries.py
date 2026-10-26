@@ -21,8 +21,9 @@ not produce it. Callers must not assume a worktree, a branch, or a realpath.
 
 Key order is load-bearing
 -------------------------
-The 7 engrane entries are pinned byte-for-byte against fixtures/
-engrane_baseline_20261011.json, captured 2026-10-11 before this module existed.
+The 7 baseline entries are pinned byte-for-byte against the baseline fixture
+captured 2026-10-11, before this module existed (that fixture is internal and
+is not shipped; see docs/SCAFFOLD-NOTES.md).
 They are the only entries `fleet reap` has ever acted on, and reap deletes a
 worktree and a git branch. `sessionId` is therefore inserted only when it is
 KNOWN, and `updated_at` is appended only when known: a null key would move the
@@ -92,7 +93,7 @@ def _entry(name, worktree, session, session_id, alive, status, context,
             e[k] = v
     if updated_at is not None:
         e["updated_at"] = updated_at
-    # Facts the U5 gate reads. Omitted when unknown, so the 7 pinned engrane
+    # Facts the U5 gate reads. Omitted when unknown, so the 7 pinned baseline
     # entries (which have no live session and therefore no phase) do not move.
     if phase is not None:
         e["phase"] = phase

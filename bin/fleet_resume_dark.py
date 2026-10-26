@@ -12,7 +12,7 @@ WHY THIS EXISTS
         the reachable server, `pi --session <uuid> --name <name>`
 
     Prose is not a tool. Thirteen hand-typed sequences of irreversible steps on
-    Maestro's own conversations, with no dry run and no verification, is how a
+    the operator's own conversations, with no dry run and no verification, is how a
     recovery becomes an outage. This is the same route with the two things prose
     cannot have: a dry run, and a check after every irreversible step.
 
@@ -196,8 +196,8 @@ def _load(path):
 def records():
     """(source, record) for every liveness record and every name registry entry.
 
-    Both are read because neither is complete on its own: `nordisk-ads` (pid
-    885051) has a name-registry entry and NO liveness record, so a reader that
+    Both are read because neither is complete on its own: one live lead (pid
+    885051) had a name-registry entry and NO liveness record, so a reader that
     trusts one source reports a session with no transcript to resume.
     """
     out = []
@@ -221,7 +221,7 @@ def resolve(pid):
     """pid -> the ONE session it is running.
 
     Matching is pid AND start time, then "not ended" wins. Pid 1479189 carries
-    two records with the same pid and the same start time -- `engrane-seo` (live,
+    two records with the same pid and the same start time -- `theme-seo` (live,
     52 turns, 4.7 MB transcript) and `basalt` (ended, 0 turns, transcript
     MISSING). A reader that takes the last record, or the most recently updated,
     gets `basalt` and then refuses to resume a session that is right there.

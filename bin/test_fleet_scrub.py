@@ -53,8 +53,12 @@ class TestShapesAreRedacted(unittest.TestCase):
         ("huggingface", "hf_" + "h8" * 18),
         ("slack", "xoxb-" + "1234567890-abcdefghij"),
         ("telegram-bot", "123456789:" + "i9_" * 12),
-        ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
-                ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
+        # Assembled from fragments like every case above: this file is scanned
+        # by the readiness gate, and a literal three-segment JWT would be read
+        # as a leaked credential.
+        ("jwt", "ey" + "JhbGciOiJIUzI1NiJ9" + "." + "ey"
+                + "JzdWIiOiIxMjM0NTY3ODkwIn0" + "."
+                + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
     ]
 
     def test_each_shape_is_redacted_and_labelled(self):

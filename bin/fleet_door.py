@@ -19,7 +19,7 @@ Refusals enforced here (all four were prose in the SOP until today):
 
   cap     -- 5 concurrent workers per domain, COUNTED FROM THE `domain` FIELD (the
              name prefix is read only for rows written before the field existed).
-             The sprawl of 2026-10-26 was 23 engrane sessions; a cap that lives only
+             The sprawl of 2026-10-26 was 23 sessions in one domain; a cap that lives only
              in a document is not a cap. Enforced in `decide()` here AND in `fleet
              spawn`, because a worker spawned directly walks around the door -- that
              double enforcement is what makes the number true rather than advisory.
@@ -104,7 +104,7 @@ def domain_of_record(rec):
     name = str(rec.get("name") or "")
     if name and "-" in name:
         head = name.split("-", 1)[0].lower()
-        # A prefix is a domain only when it IS one of the known domains: `nordisk-x-1`
+        # A prefix is a domain only when it IS one of the known domains: `meta-x-1`
         # is a legacy scoped name, `audit-1` is a subject with a sequence.
         try:
             import pi_taxonomy

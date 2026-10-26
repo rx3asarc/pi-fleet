@@ -112,7 +112,7 @@ def reconcile(store_children, truth, alive=_alive, now=None):
             continue
         # A record that SAYS it ended is terminal evidence in its own right: an
         # alive pid on an `ended` record is a recycled pid, not a revived session
-        # (measured: nordisk-ads' record ended cleanly while its tmux name was
+        # (measured: one lead's record ended cleanly while its tmux name was
         # reused by a new pi). The record's own statement outranks pid aliveness.
         if str(rec.get("phase") or "") == "ended" or rec.get("exitClean") is True:
             report["stale_rows"].append({

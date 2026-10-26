@@ -8,7 +8,7 @@ The program used to answer "where does the store live?" by writing the answer in
 the one default that mattered most pointed at a private project:
 
 ```
-fleet_discovery.REPO  =  /mnt/HC_Volume_105587324/projects/engrane   # shipped as a default
+fleet_discovery.REPO  =  /mnt/<data-volume>/projects/<private-repo>   # shipped as a default
 ```
 
 A stranger who cloned this package got a fleet that silently listed somebody else's
@@ -31,20 +31,20 @@ shipped module asks it.
 | repo target | `FLEET_REPO` | **none** — see below | the repository a spawn or a reap acts on |
 
 `~` is resolved from `$HOME`, so the defaults follow the user. On the box this grew
-up on that is `/root`, which is why nothing changed there: the legacy paths are still
-`/root/.fleet`, `/root/fleet`, `/root/.pi/agent`, `/root/handoffs`, and a test pins
-them.
+up on that is the root user's home, which is why nothing changed there: the legacy
+paths are still `$HOME/.fleet`, `$HOME/fleet`, `$HOME/.pi/agent`, `$HOME/handoffs`,
+and a test pins them.
 
 Ask it what it resolved, and where each answer came from:
 
 ```
 $ python3 bin/fleet_paths.py
-home         /root                                     [env HOME]
-control_dir  /root/.fleet                              [default]
-work_root    /root/fleet                               [default]
-agent_home   /root/.pi/agent                           [default]
-handoff_dir  /root/handoffs                            [default]
-reports_dir  /root/docs/reports                        [default]
+home         <the root user's HOME>                   [env HOME]
+control_dir  $HOME/.fleet                              [default]
+work_root    $HOME/fleet                               [default]
+agent_home   $HOME/.pi/agent                           [default]
+handoff_dir  $HOME/handoffs                            [default]
+reports_dir  $HOME/docs/reports                        [default]
 bin_dir      <this package>/bin                        [default]
 repo         <the repo you are standing in>            [default]
 ```
@@ -99,7 +99,7 @@ The node CLIs (`pi-live`, `pi-peers`) honour `PI_AGENT_HOME` the same way, and
 $ python3 bin/fleet_paths.py              # what it resolved, and from where
 $ python3 bin/test_fleet_paths.py         # 18 tests, no box state required
 $ python3 -m unittest test_fleet_gate     # skips with a reason if fixtures/ is absent
-$ python3 /root/fleet/meta-lead/checks/check_u3.py   # the lead's frozen done-test
+$ python3 <the lead's checks dir>/check_u3.py         # the lead's frozen done-test
 ```
 
 `test_fleet_paths.py` proves four things that matter:
@@ -129,7 +129,7 @@ difference is the change, not the location.
 The three failing files at the base commit, and what happened to each:
 
 **`test_fleet_gate.py` — 3 errors, pre-existing, now skips with a reason.**
-Cause: it reads `bin/fixtures/engrane_gate_baseline_20261011.json`, and `fixtures/`
+Cause: it reads its baseline fixture under `bin/fixtures/`, and `fixtures/`
 is excluded from this repo on purpose (U2's scope: it is a private project's 7
 entries — its session names, branches and refusal texts). The guard is real and it
 should stay in the tree; what it needs is the data. It now skips **per test** with
@@ -143,7 +143,7 @@ has the data. Skipped, not passed.
 **`test_fleet_scrub.py` — 1 failure, pre-existing, NOT fixed here, and it is a real
 finding.** `test_the_real_digest_corpus_yields_no_false_positives` scrubs this box's
 live handoff corpus. Two matches today, both in
-`/root/handoffs/2026-10-20-engrane-profile-subject.md`, both the same string: a
+`$HOME/handoffs/2026-10-20-<project>-profile-subject.md`, both the same string: a
 `JWT_TOKEN=<value>` assignment inside a shell command recorded in that digest. The
 redactor's dotenv-assignment rule fires on it, which is the rule doing its job — the
 test's "zero false positives" pin is older than the digest. Deciding whether a
@@ -154,7 +154,7 @@ exist at all (a fresh install); a corpus that exists but is empty is still a fin
 
 Note on suite side effects, measured with `strace -f` over the whole suite: no test
 opens the real `lineage.json` or `registry.json` for writing. The one live-store
-touch is the advisory lock file `/root/.fleet/.lineage.lock`, which tests that never
+touch is the advisory lock file `$HOME/.fleet/.lineage.lock`, which tests that never
 set `FLEET_CONTROL_DIR` open in order to take the store lock. Harmless, but it is the
 reason the seam exists: with `FLEET_CONTROL_DIR` set, even that lands in the temp
 dir.

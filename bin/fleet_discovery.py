@@ -254,7 +254,7 @@ def entries():
 
 
 def derive_name(worktree: str) -> str:
-    """`/path/engrane-foo` under a repo named `engrane` -> `foo`.
+    """`/path/theme-foo` under a repo named `theme` -> `foo`.
 
     With no resolved repo there is no prefix to strip, so the directory name is
     the name: better a name with a prefix than a name derived from a repository

@@ -82,6 +82,7 @@ from pathlib import Path
 # whole protocol exists to remove.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import fleet_paths     # noqa: E402
 import fleet_children   # noqa: E402
 from fleet_children import (adopt_when_registered, load_lineage, save_lineage,  # noqa: E402
                               _self_session_id)
@@ -290,7 +291,7 @@ def cmd_spawn(a):
     if decision["warning"]:
         print(f"  ! {decision['warning']}")
 
-    repo = Path(a.repo).resolve()
+    repo = Path(a.repo).resolve() if a.repo else fleet_paths.require_repo()
     kind = getattr(a, "kind", "code")
     worktree = repo.parent / f"{repo.name}-{a.name}"
     if a.brief:
@@ -316,7 +317,7 @@ def cmd_spawn(a):
         # forcing one littered the repos with 23 unmerged branches, several of which
         # were exactly this kind of worker. A scratch dir is the honest home for work
         # whose deliverable is a file, and it keeps `git branch` meaningful.
-        worktree = Path("/root/fleet") / a.name
+        worktree = fleet_paths.work_root() / a.name
         branch = ""
         worktree.mkdir(parents=True, exist_ok=True)
         print(f"  scratch   {worktree} (task-kind: no branch, no worktree)")
@@ -581,7 +582,7 @@ def cmd_for(a):
     brief_text = fleet_door.manager_brief(
         a.task, dec, report_to=getattr(a, "report_to", None) or me,
         repo=getattr(a, "repo", None))
-    scratch = Path("/root/fleet") / dec["lead"]
+    scratch = fleet_paths.work_root() / dec["lead"]
     scratch.mkdir(parents=True, exist_ok=True)
     brief = scratch / "BRIEF.md"
     brief.write_text(brief_text)
@@ -1029,16 +1030,20 @@ def _teardown(e, a, skip_gates=False):
                 sh(["tmux", "kill-session", "-t", session])
 
     if wt and os.path.isdir(wt):
-        rc, _, err = sh(["git", "-C", str(REPO), "worktree", "remove", "--force", wt])
+        # `REPO` may be unresolved (no FLEET_REPO, standing outside any git repo).
+        # The worktree then belongs to whatever repo contains it, so ask git there
+        # instead of passing the string "None" to `git -C`.
+        _repo = str(REPO or wt)
+        rc, _, err = sh(["git", "-C", _repo, "worktree", "remove", "--force", wt])
         if rc != 0:
             shutil.rmtree(wt, ignore_errors=True)
-            sh(["git", "-C", str(REPO), "worktree", "prune"])
+            sh(["git", "-C", _repo, "worktree", "prune"])
 
     # `git branch -d` refuses to delete an unmerged branch — a second guard
     if e.get("branch") and not skip_gates:
-        sh(["git", "-C", str(REPO), "branch", "-d", e["branch"]])
+        sh(["git", "-C", str(REPO or wt), "branch", "-d", e["branch"]])
     elif e.get("branch"):
-        sh(["git", "-C", str(REPO), "branch", "-D", e["branch"]])
+        sh(["git", "-C", str(REPO or wt), "branch", "-D", e["branch"]])
 
     reg = load_registry()
     reg.pop(entry_key(e), None)
@@ -1072,7 +1077,9 @@ def main():
     s.add_argument("--task", default="",
                    help="the task as the human phrased it, quoted verbatim in the brief")
     s.add_argument("--base", default=BASE)
-    s.add_argument("--repo", default=str(REPO))
+    s.add_argument("--repo", default=str(REPO) if REPO else None,
+                   help="the repository to spawn into (default: $FLEET_REPO, else the "
+                        "repository you are standing in)")
     s.add_argument("--branch")
     s.add_argument("--model")
     s.add_argument("--unscoped", action="store_true",

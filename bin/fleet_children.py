@@ -44,18 +44,21 @@ import fleet_discovery
 import fleet_scrub
 from fleet_util import store_lock
 import pi_sources
+import fleet_paths
 
 # Stores. Module-level Paths on purpose: tests monkeypatch these attributes
-# rather than growing an env-var layer that only tests would use.
-LINEAGE = Path(os.environ.get("FLEET_LINEAGE", "/root/.fleet/lineage.json"))
-DIGESTS = Path(os.environ.get("FLEET_DIGESTS", "/root/handoffs/_reaped"))
+# rather than growing an env-var layer that only tests would use. The DEFAULT of
+# each one comes from `fleet_paths`, the only place that knows what the defaults
+# are (and the only place that has to change when they move).
+LINEAGE = Path(os.environ.get("FLEET_LINEAGE") or fleet_paths.control_dir() / "lineage.json")
+DIGESTS = Path(os.environ.get("FLEET_DIGESTS") or fleet_paths.handoff_dir() / "_reaped")
 # Rollups are the PUSH half of reporting (fleet rollup, 2026-10-26): a lead's
 # evidence assembled into one file, so "did it finish?" stops being a pull that
 # only a session that is awake can perform.
-REPORTS = Path(os.environ.get("FLEET_REPORTS", "/root/docs/reports"))
-NAMES_DIR = Path(os.environ.get("FLEET_NAMES_DIR", "/root/.pi/agent/session-names"))
-LEDGER = Path(os.environ.get("FLEET_LEDGER", "/root/.fleet/reap-ledger.jsonl"))
-SENTINEL_REPORT = Path("/root/.fleet/sentinel-report.json")
+REPORTS = Path(os.environ.get("FLEET_REPORTS") or fleet_paths.reports_dir())
+NAMES_DIR = Path(os.environ.get("FLEET_NAMES_DIR") or fleet_paths.agent_home() / "session-names")
+LEDGER = Path(os.environ.get("FLEET_LEDGER") or fleet_paths.control_dir() / "reap-ledger.jsonl")
+SENTINEL_REPORT = fleet_paths.control_dir() / "sentinel-report.json"
 
 _D = {}
 
@@ -613,14 +616,14 @@ Done criteria: {child.get('done_criteria') or '(none)'}
 You may not kill, reap, dismiss or keep anything. Do not message other sessions.
 When the file is written and non-empty, close your unit with exactly:
 
-    cd /root && /root/.pi/agent/bin/fleet done {name} \
+    cd {fleet_paths.work_root()} && {fleet_paths.bin_dir() / 'fleet'} done {name} \
       --note "reviewed {child.get('name')}" \
       --file {REVIEW_DIR / (child.get('name') or _sid_tag(sid))}.md \
       --verify "test -s {REVIEW_DIR / (child.get('name') or _sid_tag(sid))}.md"
 """)
     import subprocess
     try:
-        subprocess.run(["/root/.pi/agent/bin/spawn-parked-session.sh", name,
+        subprocess.run([str(fleet_paths.bin_dir() / "spawn-parked-session.sh"), name,
                         f"review: write the account of dead worker {child.get('name')}"],
                        capture_output=True, timeout=60,
                        env={**os.environ, "PI_SESSION_ID": ""})
@@ -638,7 +641,7 @@ When the file is written and non-empty, close your unit with exactly:
             save_lineage(lin)
             break
     try:
-        subprocess.run(["/root/.pi/agent/bin/fleet", "send", name,
+        subprocess.run([str(fleet_paths.bin_dir() / "fleet"), "send", name,
                         f"BRIEF at {brief} — read it and execute it fully; the exact "
                         f"'fleet done' line at the end of it is your last act."],
                        capture_output=True, timeout=60)
@@ -733,8 +736,8 @@ def verify_claims(rec, timeout=120):
         t0 = time.time()
         try:
             # THE CWD MUST BE THE WORKER'S TREE OR NOTHING. This used to fall back to
-            # /root, which manufactured a FALSE RED: `python3 scripts/build_css.py`
-            # then fails with "can't open file '/root/scripts/build_css.py'" and the
+            # the operator's home, which manufactured a FALSE RED: `python3 scripts/build_css.py`
+            # then fails with "can't open file '<home>/scripts/build_css.py'" and the
             # rollup reports FAILED for a unit that was never run where it lives
             # (measured 2026-10-26 on engrane-essay-reflist-1). A check that cannot be
             # run is reported as UNRUN, never as a failure.
@@ -1309,7 +1312,7 @@ def _transcript_for(sid):
     """
     if not sid:
         return None
-    hits = sorted(Path("/root/.pi/agent/sessions").glob(f"*/{('*')}{sid}*.jsonl"))
+    hits = sorted((fleet_paths.agent_home() / "sessions").glob(f"*/{('*')}{sid}*.jsonl"))
     return str(hits[-1]) if hits else None
 
 

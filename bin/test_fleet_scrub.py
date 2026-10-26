@@ -18,7 +18,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import fleet_paths
 import fleet_scrub as S
+
+# The digest corpus is this box's own handoff history, resolved through the seam
+# so PI_AGENT_HOME / FLEET_HANDOFF_DIR move it. A public clone has no corpus,
+# which is the ONLY reason these checks may skip: when the directory exists, an
+# empty corpus stays a finding (the assertion below says so).
+HANDOFFS = fleet_paths.handoff_dir()
+REAPED = HANDOFFS / "_reaped"
+CORPUS_ABSENT = (
+    f"no handoff corpus at {HANDOFFS}: this check measures the scrubber against real "
+    "digests, and a fresh install has none. Skipped, not passed."
+)
 
 
 def scrub(text):
@@ -136,8 +148,10 @@ class TestFalsePositivesArePinned(unittest.TestCase):
             self.assertEqual(clean, text)
 
     def test_the_real_digest_corpus_yields_no_false_positives(self):
-        digests = sorted(Path("/root/handoffs/_reaped").glob("*.md"))
-        handoffs = sorted(Path("/root/handoffs").glob("*.md"))
+        if not HANDOFFS.is_dir():
+            self.skipTest(CORPUS_ABSENT)
+        digests = sorted(REAPED.glob("*.md")) if REAPED.is_dir() else []
+        handoffs = sorted(HANDOFFS.glob("*.md"))
         self.assertTrue(digests, "the digest corpus is what this check exists for; "
                                  "an empty one is a finding, not a skip")
         for path in digests + handoffs:
@@ -245,7 +259,7 @@ if __name__ == "__main__":
 
 class TestBriefInvariant(unittest.TestCase):
     BIN = Path(__file__).resolve().parent
-    REVIEW_DIR = Path("/root/handoffs/_reaped/_review")
+    REVIEW_DIR = REAPED / "_review"
 
     @classmethod
     def setUpClass(cls):

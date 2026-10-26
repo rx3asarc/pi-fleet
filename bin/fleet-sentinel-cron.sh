@@ -2,10 +2,11 @@
 # fleet-sentinel-cron — cron-safe wrapper around `fleet sentinel --apply`.
 #
 # WHY A WRAPPER AND NOT A BARE CRON LINE
-#   * cron's PATH does not include /root/.pi/agent/bin, so `fleet` (and pi-msg,
-#     which the sentinel may call to ask a parent to decide) are not resolvable.
-#     The PATH below is absolute and explicit for exactly that reason.
-#   * `fleet sentinel --apply` reads /root/.fleet/lineage.json, mutates it, then
+#   * cron's PATH does not include the fleet's own bin directory, so `fleet`
+#     (and pi-msg, which the sentinel may call to ask a parent to decide) are not
+#     resolvable. `$FLEET_BIN_DIR` (default: this script's directory) is prepended
+#     to an absolute PATH for exactly that reason.
+#   * `fleet sentinel --apply` reads $FLEET_CONTROL_DIR/lineage.json, mutates it, then
 #     writes it back (read-modify-write). Two overlapping ticks can lose an
 #     update and, in the worst case, act twice on the same child. An atomic
 #     mkdir lock makes "never two ticks at once" a guarantee, not a hope.
@@ -28,11 +29,15 @@
 
 set -u
 
-PATH=/root/.pi/agent/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The package may live anywhere; the environment says where, and these are the
+# same variables fleet_paths reads in python.
+BIN="${FLEET_BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+AGENT_HOME="${PI_AGENT_HOME:-${HOME}/.pi/agent}"
+PATH=$BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-export HOME=/root
+export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
 
-STATE=${FLEET_STATE:-/root/.fleet}
+STATE=${FLEET_STATE:-${FLEET_CONTROL_DIR:-${HOME}/.fleet}}
 LOCK=$STATE/locks/sentinel.lock
 LOG=$STATE/logs/sentinel-cron.log
 IDLE_AFTER_MIN=${IDLE_AFTER_MIN:-45}
@@ -46,7 +51,7 @@ STALE_AFTER_S=${STALE_AFTER_S:-1800}
 #                  used to ignore it, so "paused" meant "half paused". Honouring
 #                  the same file makes the kill switch mean what it says.
 SWEEPS=${FLEET_SWEEPS:-reconcile,records,lineage}
-PAUSE_FILE=${FLEET_PAUSE_FILE:-/root/.pi/advisories/PAUSE}
+PAUSE_FILE=${FLEET_PAUSE_FILE:-${AGENT_HOME}/../advisories/PAUSE}
 
 want() { case ",$SWEEPS," in *,off,*) return 1;; *,$1,*) return 0;; *) return 1;; esac; }
 
@@ -122,9 +127,9 @@ fi
 # count as dead), never touches a transcript, backs up to a verified tarball
 # first, and refuses to delete at all if any target is missing from the archive.
 # It runs BEFORE the scan so the scan judges a clean store.
-if command -v /root/.pi/agent/session-watch/tools/reap-dead-records.py >/dev/null 2>&1 \
-   && want records; then
-  sweep=$(/root/.pi/agent/session-watch/tools/reap-dead-records.py --apply 2>&1)
+REAPER="${AGENT_HOME}/session-watch/tools/reap-dead-records.py"
+if [ -x "$REAPER" ] && want records; then
+  sweep=$("$REAPER" --apply 2>&1)
   printf '%s\n' "$sweep" | grep -E 'records total|LIVE \(kept\)|DEAD \(targets\)|backup:|removed :|after   :|ABORT|note:' \
     | while IFS= read -r line; do log "  sweep: $line"; done
 fi

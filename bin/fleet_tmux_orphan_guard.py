@@ -23,7 +23,9 @@ import subprocess
 import sys
 import glob
 
-CANDIDATE_SOCKETS = ("/tmp/tmux-*/*", "/run/tmux/*/*", "/root/tmux")
+import fleet_paths
+
+CANDIDATE_SOCKETS = ("/tmp/tmux-*/*", "/run/tmux/*/*", str(fleet_paths.home() / "tmux"))
 
 
 def live_tmux_servers():

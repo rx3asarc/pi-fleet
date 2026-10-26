@@ -16,14 +16,17 @@ incomplete, and it is never allowed to be confident without evidence.
 
 INPUT TRUST ORDER (first source that can prove a field wins)
 ------------------------------------------------------------
-1. backups   /root/.fleet/backups/lineage-*.json   -- a previous store: proves
+1. backups   <control dir>/backups/lineage-*.json -- a previous store: proves
               everything it contains, including reported_at and protected
-2. names     /root/.pi/agent/session-names/*.json  -- name, startedAt, endedAt
-3. ledger    /root/.fleet/reap-ledger.jsonl        -- reap/reap-failed/dismiss/revive
+2. names     <agent home>/session-names/*.json    -- name, startedAt, endedAt
+3. ledger    <control dir>/reap-ledger.jsonl      -- reap/reap-failed/dismiss/revive
               events, the parent of the row, the digest path
-4. digests   /root/handoffs/_reaped/*.md           -- name, unit, parent NAME,
+4. digests   <handoff dir>/_reaped/*.md           -- name, unit, parent NAME,
               spawned, verdict, and the reap timestamp in the header
-5. sessions  /root/.pi/agent/sessions/*/<ts>_<sid>.jsonl -- the transcript path
+5. sessions  <agent home>/sessions/*/<ts>_<sid>.jsonl -- the transcript path
+
+Those five locations are resolved by `fleet_paths`, not by this file: see its
+docstring for the environment variables that move them.
 
 READ-ONLY BY DEFAULT. `--apply` is the only writer, and it always takes a
 timestamped backup first, refuses to shrink the store unless `--allow-shrink` is
@@ -48,12 +51,14 @@ import re
 import sys
 from pathlib import Path
 
-NAMES_DIR = Path("/root/.pi/agent/session-names")
-SESSIONS_GLOB = "/root/.pi/agent/sessions/*/*.jsonl"
-LEDGER = Path("/root/.fleet/reap-ledger.jsonl")
-BACKUPS_DIR = Path("/root/.fleet/backups")
-DIGESTS_DIR = Path("/root/handoffs/_reaped")
-LINEAGE = Path("/root/.fleet/lineage.json")
+import fleet_paths
+
+NAMES_DIR = fleet_paths.agent_home() / "session-names"
+SESSIONS_GLOB = str(fleet_paths.agent_home() / "sessions" / "*" / "*.jsonl")
+LEDGER = fleet_paths.control_dir() / "reap-ledger.jsonl"
+BACKUPS_DIR = fleet_paths.control_dir() / "backups"
+DIGESTS_DIR = fleet_paths.handoff_dir() / "_reaped"
+LINEAGE = fleet_paths.control_dir() / "lineage.json"
 
 SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 DIGEST_NAME_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<name>.+)-(?P<sid8>[0-9a-f]{8})\.md$")

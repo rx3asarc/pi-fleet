@@ -21,6 +21,27 @@ import fleet_entries  # noqa: E402  (the private liveness helper is part of the 
 FIXTURES = Path(__file__).parent / "fixtures"
 BASELINE = FIXTURES / "engrane_baseline_20261011.json"
 
+FIXTURES_MISSING = (
+    f"the frozen baseline is not in this tree ({BASELINE}). It is a copy of a PRIVATE "
+    "project's 7 entries (session names, branches, heads), so it is excluded from the "
+    "shipped repo on purpose: it is another project's state, not an example. The "
+    "byte-identity guard is therefore unarmed here; copy the fixture out of the private "
+    "deployment's bin/fixtures/ (or point FLEET_GATE_FIXTURES at that directory) to arm "
+    "it. Skipped, not passed: nothing has been verified."
+)
+
+_elsewhere = os.environ.get("FLEET_GATE_FIXTURES")
+if _elsewhere:
+    BASELINE = Path(_elsewhere) / BASELINE.name
+
+
+class FixturesNeeded(unittest.TestCase):
+    """Skip per test (not per class) so the count shows how many guards are unarmed."""
+
+    def setUp(self):
+        if not BASELINE.is_file():
+            raise unittest.SkipTest(FIXTURES_MISSING)
+
 
 def engrane_namer(path):
     """`derive_name` from fleet: strip the repo's own name prefix."""
@@ -63,7 +84,7 @@ def row(session_id, name, cwd="/root", worktree=None, tmux=_UNSET, pid=None):
 
 
 # ── the regression guard ─────────────────────────────────────────────────────
-class TestEngraneByteIdentical(unittest.TestCase):
+class TestEngraneByteIdentical(FixturesNeeded):
     """The 7 engrane entries must not move, gain keys, or change order."""
 
     def test_seven_engrane_entries_are_byte_identical(self):
@@ -216,7 +237,7 @@ class TestWiringGaps(unittest.TestCase):
 
 
 # ── shape and purity ─────────────────────────────────────────────────────────
-class TestShapeAndPurity(unittest.TestCase):
+class TestShapeAndPurity(FixturesNeeded):
     def test_registry_overrides_the_derived_name(self):
         wt, facts = baseline_inputs()
         target = wt[0]["path"]

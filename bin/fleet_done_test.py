@@ -41,7 +41,9 @@ import subprocess
 import time
 from pathlib import Path
 
-CACHE_DIR = Path(os.environ.get("FLEET_VERIFY_CACHE", "/root/.fleet/verify-cache"))
+import fleet_paths
+
+CACHE_DIR = Path(os.environ.get("FLEET_VERIFY_CACHE") or fleet_paths.control_dir() / "verify-cache")
 # Absence of a frozen test is LEGACY, not failure: records written before this rule
 # existed must keep working, and the rollup is required to label them as weaker
 # evidence rather than letting them pass as equals.

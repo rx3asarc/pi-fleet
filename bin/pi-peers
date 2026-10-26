@@ -16,8 +16,11 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const HOME = process.env.HOME || os.homedir();
-const REGISTRY = path.join(HOME, ".pi/agent/session-names");
-const PI_MSG = path.join(HOME, ".pi/agent/bin/pi-msg");
+// PI_AGENT_HOME is the seam (`fleet_paths.agent_home()`); `~/.pi/agent` is only
+// the default it reproduces. Resolved once, here, so no path below invents one.
+const AGENT_HOME = process.env.PI_AGENT_HOME || path.join(HOME, ".pi", "agent");
+const REGISTRY = path.join(AGENT_HOME, "session-names");
+const PI_MSG = path.join(AGENT_HOME, "bin", "pi-msg");
 const json = process.argv.includes("--json");
 
 function intercomRoster() {

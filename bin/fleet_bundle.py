@@ -38,12 +38,15 @@ import socket
 import sys
 from pathlib import Path
 
+import fleet_paths
+
 SCHEMA = 1
-LINEAGE = Path("/root/.fleet/lineage.json")
-LEDGER = Path("/root/.fleet/reap-ledger.jsonl")
-DIGESTS_DIR = Path("/root/handoffs/_reaped")
-BUNDLES_DIR = Path("/root/.fleet/bundles")
-BACKUPS_DIR = Path("/root/.fleet/backups")
+
+LINEAGE = fleet_paths.control_dir() / "lineage.json"
+LEDGER = fleet_paths.control_dir() / "reap-ledger.jsonl"
+DIGESTS_DIR = fleet_paths.handoff_dir() / "_reaped"
+BUNDLES_DIR = fleet_paths.control_dir() / "bundles"
+BACKUPS_DIR = fleet_paths.control_dir() / "backups"
 
 # Fields that are store-only today; they are the reason this file exists.
 EVIDENCE_FIELDS = ("checks", "claims", "protected", "role", "ended_between_ticks",

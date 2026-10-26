@@ -2,14 +2,15 @@
 """Shape-based redaction for text that leaves a session and becomes durable.
 
 Written for one caller: the fleet's reviewer, which reads an *untrusted* transcript
-and writes its account into /root/handoffs/_reaped/*.md. That file outlives the
+and writes its account into the handoff dir (`_reaped/*.md`). That file outlives the
 session, so anything a secret-shaped string carries into it is permanent.
 
 Design rules, in order of importance:
 
 1. **By shape, never by value.** This module knows no keys. It cannot consult the
-   value index (that would mean reading /root/.secrets.env inside a writer, and a
-   writer that must be safe cannot depend on having the secrets to be safe).
+   value index (that would mean reading the operator's secrets store, `~/.secrets.env`,
+   inside a writer, and a writer that must be safe cannot depend on having the
+   secrets to be safe).
 2. **Parity, not invention.** The pattern list below mirrors
    `~/.pi/agent/extensions/secret-shield/shield.mjs` (`SHAPES`, plus its dotenv
    assignment rule and `MIN_SECRET_LEN = 16`). The parity test for that list lives

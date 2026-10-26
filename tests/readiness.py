@@ -2,7 +2,7 @@
 """Publish-readiness gate for a pi-fleet tree.
 
 One command that answers "may this tree be published?" mechanically instead of
-by opinion. Ten checks, each with a stable id; every finding names the check id
+by opinion. Twelve checks, each with a stable id; every finding names the check id
 and the file it came from. A secret VALUE is never printed -- only the pattern
 name and the path.
 
@@ -23,6 +23,11 @@ Design notes that matter for trusting the verdict:
   ships the bytes. A leftover *.bak or __pycache__ on disk is a finding.
 * The credentials check is never silenced -- not by .gitignore, not by the
   allowlist -- because a leaked key cannot be un-leaked by a config file.
+* Two checks run CODE instead of reading files: each guard's own `--selftest`,
+  and the shipped `bin/pi-msg` probed with no broker reachable. They shell out
+  because the alternative is a second copy of a guard's assertions inside this
+  file, and a second source of truth for a guard's test is how a guard starts
+  passing while its subject is broken.
 
 Stdlib only, no network.
 """
@@ -32,7 +37,10 @@ import fnmatch
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
 
@@ -41,7 +49,7 @@ EXIT_BLOCKED = 1
 EXIT_ERROR = 2
 
 # --------------------------------------------------------------------------
-# The ten checks. Order here is the order they are reported in.
+# The twelve checks. Order here is the order they are reported in.
 # --------------------------------------------------------------------------
 
 CHECKS = (
@@ -71,6 +79,14 @@ CHECKS = (
     ("toolchain-deps",
      "every external CLI the fleet entry point shells out to ships inside the "
      "package (bin/pi-msg, bin/pi-tmux, bin/pi-live, bin/pi-tree)"),
+    ("guard-selftests",
+     "each guard's OWN `--selftest` exits 0 when run as a subprocess "
+     "(fleet_pid_assert, fleet_tmux_orphan_guard, fleet_name_lint) -- this gate "
+     "calls them, it does not reimplement them"),
+    ("intercom-dependency",
+     "the messaging broker pi-intercom is a DECLARED dependency (no worker can be "
+     "messaged without it) and bin/pi-msg fails actionably, naming the install "
+     "command, when it is missing"),
 )
 
 CHECK_IDS = tuple(cid for cid, _ in CHECKS)
@@ -97,6 +113,16 @@ HOME_PATH_EXEMPT_PREFIXES = ("test_",)
 # fleet shells out to these; they must ship inside the package because a pi
 # package cannot put a CLI on PATH.
 TOOLCHAIN = ("pi-msg", "pi-tmux", "pi-live", "pi-tree")
+
+# Guards that own their own test. This gate runs `bin/<tool> --selftest` for each;
+# it deliberately knows nothing about what they assert.
+GUARDS = ("fleet_pid_assert.py", "fleet_tmux_orphan_guard.py", "fleet_name_lint.py")
+
+# The broker every send/ask/done/report travels through.
+BROKER_PACKAGE = "pi-intercom"
+BROKER_INSTALL_HINT = "npm:pi-intercom"
+PI_MSG = "bin/pi-msg"
+GUARD_SELFTEST_TIMEOUT = 180
 
 SKIP_DIRS = {'.git', '__pycache__', '.hg', '.svn', 'node_modules'}
 
@@ -593,6 +619,149 @@ def check_toolchain_deps(root, files):
     return findings
 
 
+def check_guard_selftests(root):
+    """Run each guard's OWN test as a subprocess. Never restate its assertions.
+
+    A guard whose selftest is missing or red is a guard nobody can trust, and the
+    failure is reported with the tool name and the tail of its output: "a guard
+    failed" is not a finding a maintainer can act on.
+    """
+    findings = []
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    for tool in GUARDS:
+        rel = "bin/%s" % tool
+        path = os.path.join(root, "bin", tool)
+        if not os.path.isfile(path):
+            findings.append(Finding(
+                "guard-selftests", rel,
+                "guard is missing from the package, so its selftest cannot run -- a "
+                "guard that is not shipped is not a guard"))
+            continue
+        try:
+            proc = subprocess.run(
+                [sys.executable, path, "--selftest"],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=GUARD_SELFTEST_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            findings.append(Finding(
+                "guard-selftests", rel,
+                "--selftest did not finish in %ds" % GUARD_SELFTEST_TIMEOUT))
+            continue
+        except OSError as exc:
+            findings.append(Finding("guard-selftests", rel,
+                                    "cannot run --selftest: %s" % exc))
+            continue
+        if proc.returncode != 0:
+            tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-3:]
+            findings.append(Finding(
+                "guard-selftests", rel,
+                "%s --selftest exits %d: %s" % (tool, proc.returncode, " | ".join(tail))))
+    return findings
+
+
+def _declared_dependencies(root):
+    """The manifest's dependency fields, or None when there is no readable manifest."""
+    path = os.path.join(root, "package.json")
+    if not os.path.isfile(path):
+        return None
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        manifest = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    deps = {}
+    for field in ("dependencies", "peerDependencies", "optionalDependencies"):
+        block = manifest.get(field)
+        if isinstance(block, dict):
+            deps.update(block)
+    return deps
+
+
+def check_intercom_dependency(root):
+    """The broker is required, declared, and its absence is explained, not fatal-looking.
+
+    `package.json` shipped no dependencies at all once, which produced a fleet that could
+    spawn workers and then had no way to message them -- an install that looks successful
+    and cannot coordinate. Declaring it is half the fix; the other half is that a user who
+    lacks it is told the command that installs it.
+    """
+    findings = []
+    deps = _declared_dependencies(root)
+    if deps is None:
+        findings.append(Finding(
+            "intercom-dependency", "package.json",
+            "no readable package.json, so %r cannot be shown to be a dependency"
+            % BROKER_PACKAGE))
+    elif BROKER_PACKAGE not in deps:
+        findings.append(Finding(
+            "intercom-dependency", "package.json",
+            "%r is not declared in dependencies/peerDependencies; `pi install` would "
+            "not install the broker, and every send/ask/done/report needs it"
+            % BROKER_PACKAGE))
+
+    # the failure has to be actionable: no broker, one line, naming the install.
+    msg = os.path.join(root, PI_MSG)
+    if not os.path.isfile(msg):
+        findings.append(Finding("intercom-dependency", PI_MSG,
+                                "pi-msg is missing from the package"))
+        return findings
+    findings += _probe_pi_msg_without_broker(msg, root)
+    return findings
+
+
+def _probe_pi_msg_without_broker(msg_path, root):
+    """Run the shipped pi-msg with no broker reachable and grade only its FAILURE.
+
+    A package can pass every static check and still tell a stranger `not installed at
+    /some/path`, which is a dead end. So the probe asserts the three things a human
+    needs: it exits non-zero, it names the install command, and it prints no absolute
+    home path.
+    """
+    findings = []
+    tmp = tempfile.mkdtemp(prefix="readiness-broker-")
+    try:
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+               "HOME": tmp, "AGENT_HOME": tmp, "PI_AGENT_HOME": tmp}
+        try:
+            proc = subprocess.run(
+                ["bash", msg_path, "send", "--to", "readiness-probe", "--text", "probe"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            findings.append(Finding("intercom-dependency", PI_MSG,
+                                    "could not be probed without a broker: %s" % exc))
+            return findings
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode == 0:
+            findings.append(Finding(
+                "intercom-dependency", PI_MSG,
+                "exits 0 with no broker reachable -- it cannot have sent anything, so "
+                "the probe (or the tool) is lying about delivery"))
+            return findings
+        if BROKER_INSTALL_HINT not in blob:
+            findings.append(Finding(
+                "intercom-dependency", PI_MSG,
+                "fails without naming the package to install; a user with no broker gets "
+                "a dead end instead of `pi install %s` (said: %s)"
+                % (BROKER_INSTALL_HINT, blob.strip().splitlines()[:1])))
+        elif not re.search(r"\bpi\s+install\b", blob):
+            findings.append(Finding(
+                "intercom-dependency", PI_MSG,
+                "names the package but not the command that installs it (said: %s)"
+                % blob.strip().splitlines()[:1]))
+        if HOMEPATH_RE.search(blob):
+            findings.append(Finding(
+                "intercom-dependency", PI_MSG,
+                "prints an absolute home path instead of an action: %s"
+                % blob.strip().splitlines()[:1]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return findings
+
+
 # --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
@@ -640,6 +809,8 @@ def run_gate(root):
     raw += check_internal_vocab(root, shipped)
     raw += check_hardcoded_home(root, shipped)
     raw += check_toolchain_deps(root, all_files)
+    raw += check_guard_selftests(root)
+    raw += check_intercom_dependency(root)
 
     findings, suppressed = [], []
     for finding in sorted(raw, key=Finding.sort_key):

@@ -23,8 +23,8 @@ bin/fleet                     argparse front end: 26 subcommands, dispatch only
   ├── fleet_reader.py         the independent adversarial reader brief + verdict
   ├── fleet_scrub.py          secret redaction over transcripts and logs
   ├── fleet_util.py           sh / die / clip — the three primitives everyone imports
-  └── fleet_*.py              audit, bundle, policy, restore, resume_dark, pid_assert,
-                              tmux_orphan_guard, ground_truth, name_drift
+  └── fleet_*.py              audit, bundle, policy, restore, resume_dark, ground_truth,
+                              name_drift
 ```
 
 The split that matters: **`fleet_discovery` is the only module allowed to ask the world
@@ -32,6 +32,28 @@ what exists** (git, tmux, the registry). Everything downstream of it takes entri
 arguments, which is why the gate and the lineage decision can be tested without a repo, a
 tmux server, or a clock. A second enumerator of "what exists" is the bug this layout
 exists to prevent.
+
+## Guards, and why each one owns its own test
+
+Three tools encode a single hard-won rule each. They are not advisory helpers: two of them
+stand between a live process and a wrongly-reaped worker, and the third stands between a
+fleet and a roster of names that mean nothing.
+
+| guard | the rule it enforces |
+|---|---|
+| `bin/fleet_pid_assert.py` | a session's pid must still be the pid it claims; a pid that was reused by another process is not evidence that the worker is alive |
+| `bin/fleet_tmux_orphan_guard.py` | a tmux server that is alive but unreachable is not a healthy server — do not kill through a socket nobody is listening on |
+| `bin/fleet_name_lint.py` | a session name must be its subject: no category prefix (`meta-`, `tmp-`), and a domain prefix only where the domain is the subject |
+
+Each ships a `--selftest` that exits non-zero on its own failure, and each has the same
+contract: **exit 2 means it could not read its source**, which is not the same as clean. The
+readiness gate (`tests/readiness.py`, check id `guard-selftests`) runs those selftests as
+subprocesses rather than restating what they assert — a second copy of a guard's assertions
+is how a guard starts passing while its subject is broken.
+
+The name linter is report-only by design: it reports live violations and *counts* historical
+ones, and never relabels the record. A linter that rewrites its own past cannot be trusted
+to describe it.
 
 ## The evidence chain
 
@@ -63,6 +85,16 @@ A package installed through `pi install` cannot register a CLI on the user's `PA
 is why the skill in `skills/fleet/SKILL.md` invokes `bin/fleet` by path and tells the model
 to put that `bin/` on `PATH` before spawning workers.
 
+`pi-msg` is a thin client, not the broker itself: it drives the `pi-intercom` broker, which
+is therefore a **declared dependency** (`package.json` → `dependencies`) rather than an
+assumption about the host. It resolves the broker in a ladder — `pi-intercom` on `PATH`,
+then `$PI_AGENT_HOME/npm/node_modules/pi-intercom/cli.mjs` (the npm bin; `cli.ts` is the
+TypeScript sibling a release may not ship), then this package's own `node_modules`, then
+`npx --no-install pi-intercom` — and when every rung fails it prints the one command that
+fixes it, `pi install npm:pi-intercom`. Nothing in `send`/`ask`/`done`/`rollup` works
+without that broker, which is why the gate's `intercom-dependency` check probes the failure
+path and not just the manifest.
+
 ## State it keeps
 
 Runtime state lives **outside** the package, in the control dir `FLEET_CONTROL_DIR`
@@ -86,11 +118,17 @@ Related locations, each with its own environment override:
 | `FLEET_HANDOFF_DIR` | `~/handoffs` | handoff documents |
 | `FLEET_BIN_DIR` | the directory the CLI lives in | siblings above are resolved from here |
 
-**Honest status at the packaging commit:** the seam (`bin/fleet_paths.py`) is the config
-unit's deliverable and had not landed yet, so the paths above are still literal `/root/…`
-strings inside the modules. Documented here because it is the contract; if
-`bin/fleet_paths.py` is absent in your checkout, assume the literals are hardcoded and set
-nothing — the defaults are this box's.
+**The seam is real.** `bin/fleet_paths.py` resolves every location, and each one has an
+environment override; the table above is a description of its defaults, not a list of
+literals scattered through the modules. If a module still holds an absolute path, that is a
+bug in that module and the readiness gate's `hardcoded-home` check is expected to name it.
+
+**What this architecture does not cover is written down in the README's "Honest limits"
+section** ([../README.md](../README.md#honest-limits)): hand-started pi sessions are invisible
+to the pid/orphan rules, worker-spawned processes are unsupervised until the box-doctor
+`leaks` domain lands, the per-domain cap counts a recorded field rather than a prefix, and
+the name is a label while the sessionId is the identity. Read that before trusting a green
+test run to mean "nothing can go wrong".
 
 ## Tests
 
@@ -104,3 +142,7 @@ Two of them (`test_fleet_entries.py`, `test_fleet_gate.py`) compare against froz
 files that are deliberately not published, because they contain this project's own session
 state. They are red in a clean clone for that reason, and `docs/PUBLISHING.md` records the
 measured suite state rather than promising a green one.
+
+What the suites here do **not** cover: the kill/liveness path is exercised by 15 node suites
+that live outside this repo (`pi-live-tests`). That coverage is UNMEASURED from inside
+`pi-fleet`, not green — see [../README.md](../README.md#honest-limits).

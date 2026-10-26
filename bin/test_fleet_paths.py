@@ -235,13 +235,30 @@ class TestShellAndPythonAgree(unittest.TestCase):
                 else:
                     os.environ["HOME"] = old
 
-    def test_pi_msg_resolves_the_same_cli_it_always_did(self):
+    def test_pi_msg_resolves_the_broker_from_the_seam(self):
         """pi-msg holds the one path that is not under a fleet store: the
-        pi-intercom CLI inside the agent home."""
+        pi-intercom CLI inside the agent home.
+
+        The broker became a declared dependency, so pi-msg now resolves a LADDER (PATH,
+        then the agent home, then this package's node_modules, then npx) instead of one
+        literal. The assertion is narrower on purpose: the agent home must still come
+        from the seam, both sibling entry points must be tried (cli.mjs is the npm bin;
+        cli.ts is the TypeScript sibling a release may not ship), and the message when
+        every rung fails must name the install command rather than a path.
+        """
         src = (HERE / "pi-msg").read_text()
         self.assertRegex(src, r'AGENT_HOME="\$\{PI_AGENT_HOME:-\$\{HOME\}/\.pi/agent\}"',
                          "pi-msg no longer resolves its agent home from the seam")
-        self.assertIn('CLI="${AGENT_HOME}/npm/node_modules/pi-intercom/cli.ts"', src)
+        self.assertIn('dir="${AGENT_HOME}/npm/node_modules/pi-intercom"', src,
+                      "pi-msg no longer looks for the broker in the agent home")
+        self.assertIn('"$dir/cli.mjs"', src, "pi-msg does not try the npm bin (cli.mjs)")
+        self.assertIn('"$dir/cli.ts"', src, "pi-msg does not try the cli.ts sibling")
+        self.assertIn('tsx="${AGENT_HOME}/npm/node_modules/tsx/dist/cli.mjs"', src,
+                      "the cli.ts rung needs the tsx runner beside it")
+        self.assertIn("pi install npm:pi-intercom", src,
+                      "a missing broker must name the command that installs it")
+        self.assertNotIn("/ro" + "ot/", src,
+                         "pi-msg must not carry an absolute home path")
 
     def test_cron_wrappers_resolve_their_own_bin_directory(self):
         for name in ("fleet-pid-assert-cron.sh", "fleet-tmux-orphan-cron.sh",

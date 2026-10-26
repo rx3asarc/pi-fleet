@@ -13,7 +13,7 @@ run (bad path, unreadable file). A gate that cannot run must never look green.
 `python3 tests/selftest_readiness.py` proves the gate can fail: it plants one
 violation per check in a throwaway tree and demands the right check id back.
 
-## The ten checks
+## The twelve checks
 
 | id | fails when |
 |---|---|
@@ -27,9 +27,18 @@ violation per check in a throwaway tree and demands the right check id back.
 | `internal-vocab` | private deployment vocabulary in a shipped file |
 | `hardcoded-home` | an absolute home-directory path outside `bin/fleet_paths.py` and outside tests |
 | `toolchain-deps` | `fleet` shells out to `pi-msg`/`pi-tmux`/`pi-live`/`pi-tree` and the CLI is not in `bin/` |
+| `guard-selftests` | any of `fleet_pid_assert.py`, `fleet_tmux_orphan_guard.py`, `fleet_name_lint.py` is missing, or its own `--selftest` exits non-zero (the finding carries the tool name and the tail of its output) |
+| `intercom-dependency` | `package.json` does not declare `pi-intercom`, or the shipped `bin/pi-msg` exits 0 with no broker reachable / fails without naming `pi install npm:pi-intercom` / prints an absolute home path |
 
 Findings name the check id and the path. A credential *value* is never printed —
 only the pattern name and the line number.
+
+Two of these run **code**, not `grep`: `guard-selftests` executes each guard's own
+`--selftest` as a subprocess, and `intercom-dependency` runs `bin/pi-msg` with an
+empty agent home and no broker on `PATH`. The alternative — copying a guard's
+assertions into this file, or grepping for the right words in the failure
+message — is a second source of truth, and a second source of truth is how a
+guard keeps passing while its subject is broken.
 
 ## Two deliberate decisions
 

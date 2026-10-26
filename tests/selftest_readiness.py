@@ -57,6 +57,7 @@ MANIFEST = {
     "description": "a fixture package",
     "license": "MIT",
     "keywords": ["pi-package"],
+    "dependencies": {"pi-intercom": "^0.16.1"},
     "pi": {"skills": ["./skills"]},
 }
 
@@ -80,7 +81,29 @@ GITIGNORE = "__pycache__/\n*.pyc\n*.bak*\n"
 ALL_CHECK_IDS = {
     "secrets", "vendored-binary", "backup-file", "pycache", "license", "readme",
     "package-manifest", "internal-vocab", "hardcoded-home", "toolchain-deps",
+    "guard-selftests", "intercom-dependency",
 }
+
+# A fixture guard: it passes its own selftest ONLY when handed --selftest, which is how
+# these fixtures prove the gate actually calls the guard instead of restating it.
+GUARD_STUB = '''#!/usr/bin/env python3
+import sys
+
+if "--selftest" not in sys.argv:
+    print("usage: %s --selftest", file=sys.stderr)
+    sys.exit(2)
+print('{"selftest_ok": true}')
+sys.exit(0)
+'''
+
+GUARD_NAMES = ("fleet_pid_assert.py", "fleet_tmux_orphan_guard.py", "fleet_name_lint.py")
+
+# A fixture pi-msg that behaves like the real one with no broker reachable: it fails, and
+# it says what to run. A stub that exits 0 would make the clean tree a lie.
+PI_MSG_BROKERLESS_STUB = '''#!/bin/bash
+echo "pi-msg: the pi-intercom broker is not installed - run: pi install npm:pi-intercom" >&2
+exit 1
+'''
 
 
 def build_clean_tree(root):
@@ -100,6 +123,13 @@ def build_clean_tree(root):
         path.write_text("#!/usr/bin/env python3\nprint('%s fixture')\n" % helper,
                         encoding="utf-8")
         path.chmod(0o755)
+    # pi-msg is not a plain fixture: with no broker reachable it must fail actionably,
+    # because the gate probes exactly that failure.
+    (root / "bin" / "pi-msg").write_text(PI_MSG_BROKERLESS_STUB, encoding="utf-8")
+    for guard in GUARD_NAMES:
+        gpath = root / "bin" / guard
+        gpath.write_text(GUARD_STUB, encoding="utf-8")
+        gpath.chmod(0o755)
     (root / "skills" / "fleet" / "SKILL.md").write_text(
         "# fixture skill\n\nrun bin/fleet\n", encoding="utf-8")
     return root
@@ -140,7 +170,7 @@ class GateTest(unittest.TestCase):
         self.assertEqual(doc["findings"], [])
         declared = {c["id"] for c in doc["checks"]}
         self.assertEqual(declared, ALL_CHECK_IDS,
-                         "the gate must declare all ten checks")
+                         "the gate must declare every check it claims to run")
 
     def test_human_output_is_readable(self):
         rc, _, out = run_gate(self.tree, json_mode=False)
@@ -248,6 +278,69 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rc, 1, "a missing shelled-out CLI must exit 1:\n%s" % out)
         self.assertIn("toolchain-deps", finding_ids(doc))
 
+    # -- the guards: the gate CALLS their own tests, it does not restate them ---
+
+    def test_missing_guard_is_caught(self):
+        # a guard that is not shipped is not a guard, and its selftest cannot run
+        (self.tree / "bin" / "fleet_name_lint.py").unlink()
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a missing guard must exit 1:\n%s" % out)
+        self.assertIn("guard-selftests", finding_ids(doc))
+
+    def test_failing_guard_selftest_is_caught_and_reported_with_its_output(self):
+        failing = ('#!/usr/bin/env python3\n'
+                   'import sys\n'
+                   'print("pageRank: 3 of 4 cases failed")\n'
+                   'sys.exit(3)\n')
+        (self.tree / "bin" / "fleet_pid_assert.py").write_text(failing, encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a red guard selftest must exit 1:\n%s" % out)
+        details = " ".join(f.get("detail", "") for f in doc["findings"]
+                           if f.get("id") == "guard-selftests")
+        self.assertIn("fleet_pid_assert.py", details,
+                      "the finding must name the guard that failed")
+        self.assertIn("3 of 4 cases failed", details,
+                      "the finding must carry the tail of the guard's own output")
+
+    def test_guard_that_ignores_selftest_is_caught(self):
+        # the fixture guards exit 2 unless --selftest is passed; a gate that forgot the
+        # flag would report them red, so this proves the flag is really passed
+        stubborn = '#!/usr/bin/env python3\nimport sys\nsys.exit(0 if "--selftest" in sys.argv else 2)\n'
+        for guard in GUARD_NAMES:
+            (self.tree / "bin" / guard).write_text(stubborn, encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 0, "guards that want --selftest must pass:\n%s" % out)
+
+    # -- the broker: declared, and its absence explained -----------------------
+
+    def test_undeclared_broker_dependency_is_caught(self):
+        manifest = json.loads(json.dumps(MANIFEST))
+        manifest.pop("dependencies", None)
+        (self.tree / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "an undeclared broker must exit 1:\n%s" % out)
+        self.assertIn("intercom-dependency", finding_ids(doc))
+
+    def test_pi_msg_that_succeeds_without_a_broker_is_caught(self):
+        # exit 0 with no broker reachable cannot be a delivery; it is a lie
+        (self.tree / "bin" / "pi-msg").write_text("#!/bin/bash\nexit 0\n",
+                                                   encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a pi-msg that exits 0 without a broker must exit 1:\n%s" % out)
+        self.assertIn("intercom-dependency", finding_ids(doc))
+
+    def test_pi_msg_dead_end_message_is_caught(self):
+        # the old failure mode: a path, no action
+        (self.tree / "bin" / "pi-msg").write_text(
+            '#!/bin/bash\necho "pi-intercom not installed at %s/npm/node_modules" >&2\nexit 1\n'
+            % HOME_PATH, encoding="utf-8")
+        rc, doc, out = run_gate(self.tree)
+        self.assertEqual(rc, 1, "a dead-end failure message must exit 1:\n%s" % out)
+        self.assertIn("intercom-dependency", finding_ids(doc))
+        reasons = " ".join(f.get("detail", "") for f in doc["findings"]
+                           if f.get("id") == "intercom-dependency")
+        self.assertIn("naming the package to install", reasons)
+
     def test_vendored_large_binary_is_caught(self):
         blob = b"\x7fELF" + b"\x00" * (1200 * 1024)
         (self.tree / "bin" / "fd").write_bytes(blob)
@@ -303,6 +396,38 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("secrets", out)
         self.assertNotIn(FAKE_GITHUB_TOKEN, out)
+
+
+class RealToolingTest(unittest.TestCase):
+    """The shipped tools, not fixtures: the failure a stranger actually meets.
+
+    Every other test here builds a tree. This one runs this repo's own `bin/pi-msg` with
+    no broker on PATH and an empty agent home, because "the message is actionable" is a
+    claim about the bytes that ship, and a fixture cannot prove it.
+    """
+
+    MSG = Path(__file__).resolve().parent.parent / "bin" / "pi-msg"
+
+    def test_shipped_pi_msg_fails_actionably_without_a_broker(self):
+        self.assertTrue(self.MSG.is_file(), "bin/pi-msg is missing")
+        tmp = tempfile.mkdtemp(prefix="pi-msg-nobroker-")
+        try:
+            env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": tmp,
+                   "AGENT_HOME": tmp, "PI_AGENT_HOME": tmp}
+            proc = subprocess.run(
+                ["bash", str(self.MSG), "send", "--to", "nobody", "--text", "probe"],
+                capture_output=True, text=True, env=env, timeout=180)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        self.assertNotEqual(proc.returncode, 0,
+                            "pi-msg must not report success with no broker: %s" % blob[:300])
+        self.assertIn("install", blob.lower(),
+                      "the failure must name the fix, got: %s" % blob[:300])
+        self.assertIn("npm:pi-intercom", blob,
+                      "the fix must be the package a user can install: %s" % blob[:300])
+        self.assertNotIn(HOME_PATH, blob,
+                         "a dangling absolute path is not an instruction: %s" % blob[:300])
 
 
 if __name__ == "__main__":

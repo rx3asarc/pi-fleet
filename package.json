@@ -12,6 +12,9 @@
     "worktree"
   ],
   "license": "MIT",
+  "dependencies": {
+    "pi-intercom": "^0.16.1"
+  },
   "pi": {
     "skills": [
       "./skills"

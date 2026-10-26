@@ -1,0 +1,32 @@
+{
+  "name": "@rx3asarc/pi-fleet",
+  "version": "0.1.0",
+  "description": "Durable, addressable pi workers in real tmux sessions and git worktrees, torn down only on evidence from a frozen done-test.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "fleet",
+    "agents",
+    "tmux",
+    "orchestration",
+    "worktree"
+  ],
+  "license": "MIT",
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "bin/",
+    "!bin/__pycache__/",
+    "!bin/*.pyc",
+    "!bin/test_*.py",
+    "!bin/*.bak",
+    "skills/",
+    "docs/",
+    "!docs/SCAFFOLD-NOTES.md",
+    "README.md",
+    "LICENSE"
+  ]
+}

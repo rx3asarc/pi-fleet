@@ -424,6 +424,9 @@ def cmd_spawn(a):
         seed_trust(str(worktree))
 
     plan_unit = None  # set below when --plan is given; named here so the guard above cannot be unbound
+    import fleet_brief  # also imported further down for the plan slice; one import here
+    # so the --brief path cannot reach an unbound name (this crashed a probe on
+    # 2026-10-26: the module was only imported inside the plan_unit branch).
     brief_sha, brief_path = "", str(brief)
     if plan_unit:
         rendered = fleet_brief.render(
@@ -434,6 +437,15 @@ def cmd_spawn(a):
         brief.parent.mkdir(parents=True, exist_ok=True)
         Path(brief).write_text(rendered)
         brief_sha = fleet_brief.sha(rendered)
+    else:
+        # A hand-written --brief is a contract too, and usually the ONLY one a worker
+        # gets. Hash it here or the drift check below is never armed: measured
+        # 2026-10-26, brief_sha was "" on every --brief row, so drift() answered
+        # "nothing was issued" and an edit to a live worker's contract was silent.
+        try:
+            brief_sha = fleet_brief.issue(brief)
+        except ValueError as ex:
+            die(str(ex))
 
     prompt = PROMPT.format(brief=brief)
     model = f"--model {a.model} " if a.model else ""
@@ -552,9 +564,12 @@ def cmd_spawn(a):
         patch.update(pid=ident[0], pid_starttime=ident[1], started_at=ident[2])
     if transcript:
         patch["transcript"] = transcript
+    # The brief is recorded whether it was RENDERED from a plan slice or HANDED to
+    # --brief. Recording only the rendered case is what left three units with no
+    # evidence of what they were told (2026-10-26).
+    patch.update(brief_path=brief_path, brief_sha=brief_sha)
     if plan_unit:
-        patch.update(brief_path=brief_path, brief_sha=brief_sha,
-                     plan_unit=plan_unit["n"], plan_title=plan_unit["title"])
+        patch.update(plan_unit=plan_unit["n"], plan_title=plan_unit["title"])
     _lin = load_lineage()
     _rec = _lin["children"].get(minted_sid)
     if _rec is None and sid and sid != minted_sid:

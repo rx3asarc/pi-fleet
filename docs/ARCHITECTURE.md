@@ -59,6 +59,9 @@ to describe it.
 
 1. `fleet_brief` writes the brief a worker will read; the brief is a gated artifact, not a
    paraphrase, because no worker ever reads the plan itself.
+   **Measured caveat (2026-10-26, since fixed):** the record and the file disagreed — three units carried
+   `brief_path` with `brief_sha: ""` and no brief on disk, and executed the plan directly. The
+   chain below only holds when the file exists; see the README's "Honest limits".
 2. The done-test is **frozen** at spawn (`fleet_done_test`). A worker that supplies its own
    `--verify` command is recorded as self-certified, not verified — the failure this module
    was written to close.

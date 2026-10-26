@@ -22,8 +22,8 @@ NOW = 1792242000
 
 
 def child(**kw):
-    c = new_child("01a1dead-beef-7000-9000-000000000001", "engrane-citations",
-                  "01a10000-aaaa-7000-9000-0000000000aa", "engrane-main",
+    c = new_child("01a1dead-beef-7000-9000-000000000001", "globex-citations",
+                  "01a10000-aaaa-7000-9000-0000000000aa", "globex-main",
                   "audit the citations appendix", NOW)
     c.update(kw)
     return c

@@ -99,8 +99,21 @@ def git_facts(wt: str, base: str, repo: Path):
     f["ahead"] = int(out) if rc == 0 and out.isdigit() else None
 
     # merged? (HEAD is an ancestor of base)
+    #
+    # ASKED IN THE WORKTREE'S OWN REPO, NOT IN THE DEFAULT ONE (MEASURED 2026-10-26).
+    # This used to resolve `base` in `repo`, which is fleet_paths.repo() -- ONE default
+    # project's repo -- for every discovered worktree. For any worker whose work lives
+    # in a different repo, `merge-base --is-ancestor <its head> origin/main` was asked of
+    # the wrong repository and answered "fatal: Not a valid object name", which the gate
+    # turned into "not merged: <branch> @ <head> is not an ancestor of origin/main" -- a
+    # false refusal about a merge that HAD happened. Measured on scrub-fixtures: its tip
+    # 423c165 is an ancestor of origin/main in its own clone (`echo $?` -> 0) and the gate
+    # still refused it; the same command in the default repo exits 128. A refusal that
+    # cannot be satisfied is an unreapable worker or a forced `--abandon`, so the question
+    # is now asked where it can be answered: a worktree resolves origin/main through the
+    # repo it shares with its siblings, and a plain clone resolves its own.
     if f["head"]:
-        rc, _, _ = sh(["git", "-C", str(repo or wt), "merge-base", "--is-ancestor",
+        rc, _, _ = sh(["git", "-C", str(wt), "merge-base", "--is-ancestor",
                        f["head"], base])
         f["merged"] = (rc == 0)
 

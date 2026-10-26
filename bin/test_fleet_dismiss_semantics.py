@@ -73,8 +73,8 @@ PARENT_SID = "01a1d15m-1550-7000-9000-0000000000ff"
 
 
 def child(**kw):
-    rec = fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                                  "engrane-main", "audit the citations appendix", NOW)
+    rec = fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                                  "globex-main", "audit the citations appendix", NOW)
     rec.update(kw)
     return rec
 
@@ -136,13 +136,13 @@ class Store(unittest.TestCase):
 
     def dismiss(self, note="decided by the parent"):
         self.seed(child())
-        fleet_children.cmd_dismiss(SimpleNamespace(name="engrane-citations", note=note))
+        fleet_children.cmd_dismiss(SimpleNamespace(name="globex-citations", note=note))
         return self.reload()
 
     def revive(self, rec):
         self.seed(rec)
         fleet_children.cmd_revive(SimpleNamespace(
-            name="engrane-citations", note="brought back", unit=None))
+            name="globex-citations", note="brought back", unit=None))
         return self.reload()
 
 

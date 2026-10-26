@@ -3,9 +3,9 @@
 PURE. Fixtures only. No tmux, no git, no filesystem.
 
 THE REGRESSION GUARD
-`fleet reap` deletes a worktree and a git branch. The 7 engrane entries are the
+`fleet reap` deletes a worktree and a git branch. The 7 frozen entries are the
 only entries it has ever acted on. Their refusal lists were frozen from a real
-`fleet reap --dry-run` on 2026-10-11 into fixtures/engrane_gate_baseline_*.json.
+`fleet reap --dry-run` on 2026-10-11 into `fixtures/*20261011*.json`.
 Every refusal must be reproduced WORD FOR WORD: a gate that quietly stops
 refusing is a gate that reaps something it should not, and the failure is silent
 until it is destructive.
@@ -28,23 +28,56 @@ from pathlib import Path
 from fleet_gate import gate, PROVIDERS
 
 FIXTURES = Path(__file__).parent / "fixtures"
-ENTRIES = FIXTURES / "engrane_baseline_20261011.json"
-REFUSALS = FIXTURES / "engrane_gate_baseline_20261011.json"
+FIXTURES_DIR = Path(os.environ.get("FLEET_GATE_FIXTURES") or FIXTURES)
+
+# The date the refusal lists were frozen on: a fact about WHEN, not private
+# vocabulary, and how the right files are found without their private names.
+FROZEN_DATE = "20261011"
+
+
+def frozen_fixture(directory, shape):
+    """A frozen fixture, located by DATE + CONTENT SHAPE rather than by filename.
+
+    The files are copies of ANOTHER PROJECT's real state, so the names they were saved
+    under carry that project's name and the tree excludes them. The entries baseline is
+    a JSON list; the refusal lists are a JSON object keyed by entry name. Matching on
+    both the date and the shape keeps this guard armable against the private directory
+    without a public file repeating the private vocabulary.
+
+    Nothing found -> a path that does not exist, so `FixturesNeeded` skips LOUDLY
+    instead of the guard passing because there was nothing to check.
+    """
+    absent = directory / ("frozen-%s-%s.json" % (shape, FROZEN_DATE))
+    try:
+        candidates = sorted(directory.glob("*%s*.json" % FROZEN_DATE))
+    except OSError:
+        return absent
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if shape == "entries" and isinstance(data, list):
+            return path
+        if shape == "refusals" and isinstance(data, dict):
+            return path
+    return absent
+
+
+ENTRIES = frozen_fixture(FIXTURES_DIR, "entries")
+REFUSALS = frozen_fixture(FIXTURES_DIR, "refusals")
 
 FIXTURES_MISSING = (
-    f"the frozen gate fixtures are not in this tree ({FIXTURES}). They are a copy of "
+    "the frozen gate fixtures are not in this tree (looked in "
+    f"{FIXTURES_DIR} for *{FROZEN_DATE}*.json). They are a copy of "
     "a PRIVATE project's 7 entries (its session names, branches and refusals), so they "
     "are excluded from the shipped repo on purpose: shipping them would publish another "
     "project's state. This guard is therefore unarmed here and must be armed by whoever "
-    "has the data — copy `fixtures/engrane_*_20261011.json` out of the private "
-    "deployment's bin/ into bin/fixtures/ (or set FLEET_GATE_FIXTURES to their directory) "
-    "and re-run. Skipped, not passed: nothing here has been verified."
-)
-
-elsewhere = os.environ.get("FLEET_GATE_FIXTURES")
-if elsewhere:
-    ENTRIES = Path(elsewhere) / ENTRIES.name
-    REFUSALS = Path(elsewhere) / REFUSALS.name
+    "has the data — copy the private deployment's `bin/fixtures/*%s*.json` into "
+    "bin/fixtures/ (or set FLEET_GATE_FIXTURES to their directory) and re-run: the "
+    "entry baseline is the JSON list, the refusals are the JSON object. "
+    "Skipped, not passed: nothing here has been verified."
+) % FROZEN_DATE
 
 
 class FixturesNeeded(unittest.TestCase):
@@ -63,7 +96,7 @@ class FixturesNeeded(unittest.TestCase):
 BASE = "origin/main"
 
 
-def engrane_entries():
+def frozen_entries():
     """The 7 frozen entries, as build_entries emitted them."""
     return json.loads(ENTRIES.read_text())
 
@@ -89,7 +122,7 @@ class TestGitClassUnchanged(FixturesNeeded):
     def test_the_seven_refusal_lists_are_word_for_word(self):
         want = json.loads(REFUSALS.read_text())
         got = {e["name"]: gate(e, worktree_exists=True, base=BASE)
-               for e in engrane_entries()}
+               for e in frozen_entries()}
         self.assertEqual(got, want)
 
     def test_the_guard_can_actually_fail(self):
@@ -98,7 +131,7 @@ class TestGitClassUnchanged(FixturesNeeded):
         Perturb one entry and confirm the comparison notices.
         """
         want = json.loads(REFUSALS.read_text())
-        entries = engrane_entries()
+        entries = frozen_entries()
         for e in entries:
             if e["name"] == "design-u10-defects":
                 e["dirty"] = 0
@@ -192,7 +225,7 @@ class TestOwnershipBeforeTheKill(FixturesNeeded):
         return [r for r in reasons if r.startswith("ownership")]
 
     def test_no_session_to_kill_raises_no_ownership_question(self):
-        """The 7 engrane entries have session=None. They must stay untouched."""
+        """The 7 frozen entries have session=None. They must stay untouched."""
         e = session_entry(session=None, owner_tmux=None, alive=False)
         self.assertEqual(gate(e, worktree_exists=True, base=BASE), [])
 
@@ -230,8 +263,8 @@ class TestOwnershipBeforeTheKill(FixturesNeeded):
                                  accept_silent=True, base=BASE))
         self.assertTrue(r)
 
-    def test_the_seven_engrane_entries_raise_no_ownership_reason(self):
-        for e in engrane_entries():
+    def test_the_seven_frozen_entries_raise_no_ownership_reason(self):
+        for e in frozen_entries():
             with self.subTest(name=e["name"]):
                 self.assertEqual(self._ownership(gate(e, worktree_exists=True,
                                                       base=BASE)), [])

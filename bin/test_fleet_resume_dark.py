@@ -6,7 +6,7 @@ without signalling anything: process identity (pid + start time), the
 transcript grew-not-rewritten check, and the mid-turn activity probe.
 
 They were written after the 2026-10-26 rehearsal, which is where each case came
-from: pid 1479189 carries two session records, `engrane-seo` (live) and
+from: pid 1479189 carries two session records, `globex-seo` (live) and
 `basalt` (ended, no transcript); `nimbus` had a liveness record saying `idle`
 while its transcript was being appended to. Both are cases where a plausible
 reader answers wrongly and the answer is unrecoverable.

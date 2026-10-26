@@ -23,10 +23,10 @@ from pi_index import build_index, bare_tmux_shells
 # (tmux session name, pane_pid, pi name, sessionId)
 DRIFTED = [
     ("jasper-alder",  2865745, "amber",                "01a11ade-2f99-7230-9c83-e649c4009090"),
-    ("engrane-rowan", 431941,  "plover-wren",          "01a116b1-3f3a-76dd-b584-7accd993086f"),
+    ("globex-rowan", 431941,  "plover-wren",          "01a116b1-3f3a-76dd-b584-7accd993086f"),
     ("cobalt-rowan",  2439092, "cobalt",               "01a11a38-1111-2222-3333-444455556666"),
-    ("larch",         2522560, "nordisk-goal-helper-6", "01a11a63-1111-2222-3333-444455556666"),
-    ("nimbus",        2573667, "nordisk-goal-helper-7", "01a11a75-1111-2222-3333-444455556666"),
+    ("larch",         2522560, "acme-goal-helper-6", "01a11a63-1111-2222-3333-444455556666"),
+    ("nimbus",        2573667, "acme-goal-helper-7", "01a11a75-1111-2222-3333-444455556666"),
 ]
 
 
@@ -72,7 +72,7 @@ class TestTheFiveDriftCases(unittest.TestCase):
         self.assertEqual(len(idx), 5)
         self.assertEqual({r["name"] for r in idx},
                          {"amber", "plover-wren", "cobalt",
-                          "nordisk-goal-helper-6", "nordisk-goal-helper-7"})
+                          "acme-goal-helper-6", "acme-goal-helper-7"})
 
     def test_name_is_never_the_join_key(self):
         """If two panes carry the SAME name but different pids, they stay distinct."""
@@ -125,14 +125,14 @@ class TestExactlyOnce(unittest.TestCase):
     def test_bare_tmux_shells_are_excluded_from_the_index_and_counted(self):
         """A tmux session with no pi in it holds no identity, so it is not a row."""
         s = sources(
-            panes=[{"session_name": "engrane-review-main", "pane_pid": 2584284, "cwd": "/root"},
+            panes=[{"session_name": "globex-review-main", "pane_pid": 2584284, "cwd": "/root"},
                    {"session_name": "hermes", "pane_pid": 3098670, "cwd": "/root"},
                    {"session_name": "iris", "pane_pid": 10, "cwd": "/root"}],
             live=[{"sessionId": "s-1", "pid": 10, "name": "iris", "cwd": "/root"}],
         )
         idx = build_index(s)
         self.assertEqual([r["sessionId"] for r in idx], ["s-1"])
-        self.assertEqual(bare_tmux_shells(s), ["engrane-review-main", "hermes"])
+        self.assertEqual(bare_tmux_shells(s), ["globex-review-main", "hermes"])
 
 
 class TestAttributes(unittest.TestCase):
@@ -152,12 +152,12 @@ class TestAttributes(unittest.TestCase):
     def test_fleet_supplies_worktree_and_branch(self):
         s = sources(
             live=[{"sessionId": "s-1", "pid": 10, "name": "basalt",
-                   "cwd": "/mnt/HC_Volume_105587324/projects/engrane-citations"}],
-            fleet=[{"worktree": "/mnt/HC_Volume_105587324/projects/engrane-citations",
+                   "cwd": "/mnt/fleet-volume/projects/globex-citations"}],
+            fleet=[{"worktree": "/mnt/fleet-volume/projects/globex-citations",
                     "branch": "fix/citations", "merged": True}],
         )
         r = build_index(s)[0]
-        self.assertEqual(r["worktree"], "/mnt/HC_Volume_105587324/projects/engrane-citations")
+        self.assertEqual(r["worktree"], "/mnt/fleet-volume/projects/globex-citations")
         self.assertEqual(r["branch"], "fix/citations")
 
     def test_pane_cwd_is_used_when_live_cwd_is_missing(self):
@@ -310,8 +310,8 @@ class TestTheDeclarationReachesTheRow(unittest.TestCase):
         s = sources(
             live=[{"sessionId": "sid-A", "pid": 1, "name": "alpha", "cwd": "/root"}],
             registry=[{"sessionId": "sid-A", "pid": 1, "name": "alpha",
-                       "taxonomy": "nordisk/ads/pixel"}])
-        self.assertEqual(build_index(s)[0]["taxonomy"], "nordisk/ads/pixel")
+                       "taxonomy": "acme/ads/pixel"}])
+        self.assertEqual(build_index(s)[0]["taxonomy"], "acme/ads/pixel")
 
     def test_a_record_with_no_declaration_carries_none(self):
         s = sources(
@@ -325,8 +325,8 @@ class TestTheDeclarationReachesTheRow(unittest.TestCase):
             panes=[{"session_name": "alpha", "pane_pid": 1, "cwd": "/root"}],
             live=[{"sessionId": "sid-A", "pid": 1, "name": "alpha", "cwd": "/root"}],
             registry=[{"sessionId": "sid-A", "pid": 1, "name": "alpha",
-                       "taxonomy": "engrane/media/factcheck"}])
+                       "taxonomy": "globex/media/factcheck"}])
         row = build_rows(s, first_messages={})[0]
         self.assertEqual((row["domain"], row["topic"], row["subtopic"]),
-                         ("engrane", "media", "factcheck"))
+                         ("globex", "media", "factcheck"))
         self.assertEqual(row["source"], "declared")

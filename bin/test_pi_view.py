@@ -16,7 +16,7 @@ from pi_view import state_of, group_rows, render, summary
 STATE_RANK = ["needs-you", "working", "exhausted", "harvestable", "idle"]
 
 
-def row(sid, name="x", domain="nordisk", topic="", subtopic="", **kw):
+def row(sid, name="x", domain="acme", topic="", subtopic="", **kw):
     r = {"sessionId": sid, "name": name, "domain": domain, "topic": topic,
          "subtopic": subtopic, "phase": "idle", "ctx_pct": 10.0,
          "pending_ask": None, "unpushed": 0, "registry_topic": "x", "tmux": None}
@@ -25,7 +25,7 @@ def row(sid, name="x", domain="nordisk", topic="", subtopic="", **kw):
 
 
 def swarm(n):
-    return [row(f"s{i}", name=f"nordisk-goal-helper-{i}", domain="nordisk",
+    return [row(f"s{i}", name=f"acme-goal-helper-{i}", domain="acme",
                 topic="goal", subtopic="swarm.helper") for i in range(n)]
 
 
@@ -61,18 +61,18 @@ class TestStateVocabulary(unittest.TestCase):
 
 class TestGrouping(unittest.TestCase):
     def test_groups_by_domain_topic_subtopic(self):
-        rows = [row("a", domain="nordisk", topic="theme", subtopic="dup-create"),
-                row("b", domain="nordisk", topic="theme", subtopic="dup-create"),
-                row("c", domain="nordisk", topic="theme", subtopic="other"),
-                row("d", domain="engrane", topic="review", subtopic="")]
+        rows = [row("a", domain="acme", topic="theme", subtopic="dup-create"),
+                row("b", domain="acme", topic="theme", subtopic="dup-create"),
+                row("c", domain="acme", topic="theme", subtopic="other"),
+                row("d", domain="globex", topic="review", subtopic="")]
         g = group_rows(rows)
-        self.assertEqual(len(g["nordisk"]["theme"]["dup-create"]), 2)
-        self.assertEqual(len(g["nordisk"]["theme"]["other"]), 1)
-        self.assertEqual(len(g["engrane"]["review"][""]), 1)
+        self.assertEqual(len(g["acme"]["theme"]["dup-create"]), 2)
+        self.assertEqual(len(g["acme"]["theme"]["other"]), 1)
+        self.assertEqual(len(g["globex"]["review"][""]), 1)
 
     def test_the_23_swarm_collapse_to_one_group(self):
         g = group_rows(swarm(23))
-        self.assertEqual(len(g["nordisk"]["goal"]["swarm.helper"]), 23)
+        self.assertEqual(len(g["acme"]["goal"]["swarm.helper"]), 23)
 
     def test_unscoped_is_its_own_group(self):
         g = group_rows([row("a", domain="unscoped", topic="", subtopic="")])
@@ -116,7 +116,7 @@ class TestSummary(unittest.TestCase):
         """Spec: "The number of known-drifted sessions is itself a health metric
         and is reported alongside the `unscoped` count."""
         rows = [row("s1", name="amber", tmux="jasper-alder"),          # drifted
-                row("s2", name="plover-wren", tmux="engrane-rowan"),    # drifted
+                row("s2", name="plover-wren", tmux="globex-rowan"),    # drifted
                 row("s3", name="iris", tmux="iris"),                    # fine
                 row("s4", name="marrow", domain="unscoped")]            # no pane
         s = summary(rows)
@@ -133,20 +133,20 @@ class TestRender(unittest.TestCase):
         out = render(swarm(23))
         self.assertIn("23", out)
         # 23 rows must NOT produce 23 identical lines
-        self.assertLess(out.count("nordisk-goal-helper-"), 23)
+        self.assertLess(out.count("acme-goal-helper-"), 23)
 
     def test_mixed_subtopic_swarm_collapses_to_ONE_group_with_23(self):
         """The REAL fleet shape, which the identical-fixture test above hides.
 
-        Live reality: 13 swarm.helper + 9 swarm.lead + 1 bare `nordisk-goal`,
+        Live reality: 13 swarm.helper + 9 swarm.lead + 1 bare `acme-goal`,
         all topic=goal. That is 23 sessions from ONE goal-swarm, and the done
         criterion is that they collapse to ONE group with a count -- not three.
         """
-        rows = ([row(f"h{i}", name=f"nordisk-goal-helper-{i}", topic="goal",
+        rows = ([row(f"h{i}", name=f"acme-goal-helper-{i}", topic="goal",
                      subtopic="swarm.helper") for i in range(13)]
-                + [row(f"l{i}", name=f"nordisk-goal-lead-{i}", topic="goal",
+                + [row(f"l{i}", name=f"acme-goal-lead-{i}", topic="goal",
                        subtopic="swarm.lead") for i in range(9)]
-                + [row("g", name="nordisk-goal", topic="goal", subtopic="")])
+                + [row("g", name="acme-goal", topic="goal", subtopic="")])
         self.assertEqual(len(rows), 23)
         out = render(rows)
         self.assertIn("goal  (23)", out,
@@ -165,7 +165,7 @@ class TestRender(unittest.TestCase):
         self.assertLess(out.index("urgent"), out.index("idlework"))
 
     def test_render_is_deterministic(self):
-        rows = swarm(5) + [row("z", domain="engrane")]
+        rows = swarm(5) + [row("z", domain="globex")]
         self.assertEqual(render(rows), render(rows))
 
     def test_render_empty(self):
@@ -181,25 +181,25 @@ class TestGoldenOutput(unittest.TestCase):
     """
 
     ROWS = [
-        row("s1", name="nordisk-main", topic="storefront", phase="tool:bash"),
+        row("s1", name="acme-main", topic="storefront", phase="tool:bash"),
         row("s2", name="alder", topic="theme", pending_ask="approve?"),
-        row("s3", name="nordisk-goal-helper-1", topic="goal", subtopic="swarm.helper"),
-        row("s4", name="nordisk-goal-helper-2", topic="goal", subtopic="swarm.helper"),
+        row("s3", name="acme-goal-helper-1", topic="goal", subtopic="swarm.helper"),
+        row("s4", name="acme-goal-helper-2", topic="goal", subtopic="swarm.helper"),
         row("s5", name="marrow", domain="unscoped"),
     ]
 
     GOLDEN = """\
 pi-tree — 5 live sessions  (needs-you 1, unscoped 1, drift 0)
 
-▸ nordisk  [4]  needs-you:1 working:1 idle:2
+▸ acme  [4]  needs-you:1 working:1 idle:2
    ├─ theme  (1)
    │    ◆ alder
    ├─ storefront  (1)
-   │    ▶ nordisk-main
+   │    ▶ acme-main
    ├─ goal  (2)
    │  ├─ swarm.helper  (2)
-   │  │    · nordisk-goal-helper-1
-   │  │    · nordisk-goal-helper-2
+   │  │    · acme-goal-helper-1
+   │  │    · acme-goal-helper-2
 
 ▸ unscoped  [1]  idle:1
    ├─ -  (1)

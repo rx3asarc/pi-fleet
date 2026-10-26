@@ -59,8 +59,8 @@ class IdentityBase(WorldStores):
         return reader
 
     def rec(self, **kw):
-        c = fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                                    "engrane-main", "audit appendix", int(time.time()))
+        c = fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                                    "globex-main", "audit appendix", int(time.time()))
         c.update(kw)
         return c
 
@@ -195,7 +195,7 @@ class TestUnknownNeverKills(IdentityBase):
 
 class TestIdentityIsRecorded(IdentityBase):
     def test_adopt_records_pid_and_start_time(self):
-        e = {"sessionId": SID, "name": "engrane-citations", "alive": True,
+        e = {"sessionId": SID, "name": "globex-citations", "alive": True,
              "pid": 4242, "reported": False, "session": "dune-fork-1",
              "pi_status": "", "phase": "", "pending_ask": None, "context": "",
              "branch": None, "head": None, "merged": False, "worktree": None,
@@ -203,7 +203,7 @@ class TestIdentityIsRecorded(IdentityBase):
         self.world.live_entries = [e]
         self.proc(ok())
         with quiet():
-            fleet_children.cmd_adopt(args(name="engrane-citations",
+            fleet_children.cmd_adopt(args(name="globex-citations",
                                           unit="audit appendix", parent=None,
                                           done_criteria=None))
         rec = self._reload()

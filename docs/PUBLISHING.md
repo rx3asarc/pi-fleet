@@ -145,16 +145,34 @@ required for a scoped package to be installable by anyone. Then re-verify with
 ## 6. Measured state of the test suite at this commit
 
 ```bash
+# on a clean clone (no bin/fixtures/, no external corpus)
 python3 -m unittest discover -s bin -p 'test_*.py'
-# Ran 758 tests in 24.198s
-# FAILED (failures=1, errors=9)
+# Ran 809 tests in 17.762s
+# FAILED (failures=1, skipped=19)
+
+# with the frozen baseline armed (FLEET_GATE_FIXTURES, or bin/fixtures/)
+python3 -m unittest discover -s bin -p 'test_*.py'
+# Ran 809 tests in 16.906s
+# FAILED (failures=1)
 ```
 
-33 test files, 3 of them red: `test_fleet_entries.py` and `test_fleet_gate.py` compare
-against `bin/fixtures/*.json`, which is deliberately unpublished (it is this project's own
-session state), and `test_fleet_scrub.py` fails on a corpus file outside the repo. The
-number is recorded rather than smoothed: a clean clone is expected to show those three red
-until the fixtures question is settled.
+**The count, once, with the commit it belongs to: 809 test methods at `51c1142`**
+(805 before `51c1142`, 801 before the brief-issue fix, which added four and four again).
+Subtests are not a denominator — 309 subtest passes ride inside those methods — and an earlier
+figure of 829 in the ship-readiness audit could not be reproduced from any tree on this box, so
+it is withdrawn rather than explained. If you read a different number elsewhere, that number
+belongs to a different commit; this line is the one to compare against.
+
+One red is expected and is not a defect in this tree: `test_fleet_scrub.py` asserts zero false
+positives over a corpus *outside* the repo (operator handoff notes). On a machine without that
+corpus it passes; here it fails, correctly, because the corpus contains an assignment the rule
+is built to catch. It is not allowlisted.
+
+The 19 skips are `test_fleet_entries.py` and `test_fleet_gate.py` declining to run because
+`bin/fixtures/*.json` is deliberately unpublished (it is a copy of a private deployment's real
+state, not an example). They **skip loudly**, naming the path they looked for, and say in the
+message that nothing has been verified — a guard that passes vacuously is the failure mode
+this arrangement exists to avoid. To arm them, see `tests/README.md`.
 
 ## 7. Pre-flight checklist before the first public push
 

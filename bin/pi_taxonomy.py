@@ -221,7 +221,7 @@ def _from_message(message: str):
 def _from_cwd(cwd: str):
     """Working directory — but ONLY when it is not generic.
 
-    `/root` is the important exclusion: Maestro always works there, which is
+    `/root` is the important exclusion: the operator always works there, which is
     exactly why every session in it falls through to the namer's random word.
     """
     if not cwd:

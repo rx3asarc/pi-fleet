@@ -77,7 +77,7 @@ class TestHumanAttached(unittest.TestCase):
     def test_a_human_session_is(self):
         self.assertTrue(fp.human_attached({"human_attached": True}))
         self.assertTrue(fp.human_attached({"tmux": "pi-root"}))
-        self.assertTrue(fp.human_attached({"tmux": "tg-maestro"}))
+        self.assertTrue(fp.human_attached({"tmux": "tg-operator"}))
 
     def test_a_long_lived_worker_is_not_a_human_however_old(self):
         self.assertFalse(fp.human_attached({"tmux": "pi-fleet-1",

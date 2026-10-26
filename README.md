@@ -179,6 +179,34 @@ fixed, because hiding an unmeasured edge is worse than admitting it.
 - **The kill/liveness path is UNMEASURED here, not green.** It is covered by 15 node suites
   that live outside this repo (`pi-live-tests`), so nothing in this README's test counts
   says anything about the most dangerous code path. Treat that part as unproven.
+- **A brief can be recorded without existing — fixed, and the shape of the bug is worth
+  keeping.** MEASURED 2026-10-26: three spawned units carried `brief_path=…/BRIEF.md` with
+  `brief_sha: ""` and **no file on disk**; each worked from the lead's `plan.md` instead, and
+  one re-rendered its own brief. The cause was narrower than it looked: a brief RENDERED from a
+  plan slice was hashed at issue, a brief HANDED to `--brief` was not hashed at all, and the
+  row was only patched on the rendered path. So `fleet_brief.drift()` answered "nothing was
+  issued" for the commonest way a worker gets briefed, and the check that catches a worker
+  rewriting its own contract never ran. Fixed: `fleet_brief.issue()` hashes the file at spawn,
+  missing and empty briefs are refused, and the row always carries `brief_path` **and**
+  `brief_sha` (verified end to end on a real spawn). Rows created before this fix still carry
+  `""` — for those, treat the brief as evidence only when `test -s "$brief_path"` passes too.
+- **A correct secret scan flags the scanner.** `bin/fleet_scrub.py` ships the pattern
+  definitions, so the `secrets` check matches a file that is a detector rather than a leak —
+  and `secrets` can never be allowlisted, deliberately, because a config file must not be able
+  to silence a credential. There is no detector-file exemption yet. Until there is, any tree
+  containing this repo will show that one finding, and the right response is a design decision
+  rather than a new allowlist line.
+- **The cap's decision is proven; its wiring is not.** The refuse/allow/override paths were
+  exercised against a synthetic lineage and a non-existent repo, so what is tested is the
+  decision `fleet_door` makes. No end-to-end spawn (real worktree, real tmux, real cap
+  interaction) was run as part of that test, so treat the wiring as unmeasured.
+- **The test suite has one non-hermetic test, and it is red on purpose.** `test_fleet_scrub`
+  asserts zero false positives over a live external corpus (a directory of operator handoff
+  notes, outside this repo). On the box of
+  writing that corpus contains a `NAME=value` assignment the rule correctly flags, so the test
+  fails there. The failure is the test doing its job; it is not allowlisted and the value is
+  not printed. On a clean machine with no such corpus the same test should be green — that is
+  what "clean machine" means here.
 - **The broker's own dependencies are outside our control.** `pi-intercom` declares none of
   its own, yet its CLI imports `tsx`; on the box we measured, `tsx` resolves because pi's
   npm tree hoists it. Whether that holds in a clean global install is unmeasured — if
@@ -192,6 +220,33 @@ carries `protected_set_by`, e.g. `scan:orphan-enrolment (no human signature)` fo
 added by a scan, or `pre-2026-10-26:unattributed` for records opened before that change, and
 no human signature is ever invented for either — and `fleet relabel` now exists as a verb.
 Where this README and that report disagree, this README describes the code that ships.
+
+## The shape to watch: a check that cannot apply
+
+Four times in one night, a check was asked a question it could not answer, and answered as
+though it had. That is more dangerous than a check that fails, because a failure gets read.
+
+| the check | what it was asked | what it answered |
+|---|---|---|
+| per-domain cap | how many workers are in *this* domain, for a row that records no domain | "under the limit" — a worker with no domain in its name was counted in no bucket |
+| brief drift | is this the brief you issued? for a brief that was never hashed | "nothing was issued" |
+| merged | is this branch an ancestor of `origin/main`? asked of the *default* project's repo | "not merged" — while git said `fatal: Not a valid object name` |
+| secret corpus | is this a false positive? over a corpus containing a real assignment | "hit" — correctly: the rule was right and the corpus was wrong. This one is loud on purpose |
+
+The first three are fixed, each with a test that fails when the fix is reverted: the cap counts
+a `domain` field (name prefix only for legacy rows), `fleet_brief.issue()` hashes a hand-written
+brief at spawn and refuses an empty one, and `git_facts` asks the worktree's own repo. The
+fourth is not a bug and is not allowlisted.
+
+The rule that came out of it: **a check that skips must say so, and a check that cannot be
+answered is not a pass.** Where the question genuinely does not apply, the refusal says which
+question it declined to ask and why — `git_provider` returns nothing for a task-kind entry with
+no branch rather than refusing it for a merge that could never happen.
+
+A fifth gap is honest and unfixed: **the memory ceiling is live-only.** The deployment this grew
+up on refuses a spawn that would cross a RAM+swap ceiling unless the human passes `--over-mem`,
+and records the override. That code is not in this package, so a fleet installed from here can
+spawn until the box swaps. It is named here rather than quietly left out.
 
 ## What this is not
 

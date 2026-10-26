@@ -276,16 +276,10 @@ class TestAFreshStoreActuallyWorks(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _real_store_fingerprint(self):
-        p = Path.home() / ".fleet" / "lineage.json"
-        try:
-            st = p.stat()
-        except OSError:
-            return None
-        return (st.st_size, st.st_mtime_ns)
+    def _real_store(self) -> Path:
+        return Path.home() / ".fleet" / "lineage.json"
 
     def test_list_json_works_against_a_temp_control_dir(self):
-        before = self._real_store_fingerprint()
         rc, out, err = run([sys.executable, HERE / "fleet", "list", "--json"],
                            cwd=self.tmp, env=self.env)
         self.assertEqual(rc, 0, f"fleet list --json failed: {err[-400:]}")
@@ -293,19 +287,27 @@ class TestAFreshStoreActuallyWorks(unittest.TestCase):
         self.assertGreaterEqual(start, 0, f"no JSON in output: {out[:200]}")
         data = json.loads(out[start:])
         self.assertIsInstance(data, list)
-        self.assertEqual(self._real_store_fingerprint(), before,
-                         "fleet list touched the real lineage store")
+        # It must enumerate the repo it was TOLD about (FLEET_REPO=this package's
+        # repo), not whatever happens to be lying around, and it must not have
+        # created the registry it would write on a mutating verb.
+        self.assertFalse((self.tmp / "c" / "registry.json").exists(),
+                         "a read-only verb wrote the registry")
 
     def test_the_store_is_created_where_the_override_says(self):
         """save_lineage is the writer every mutating verb goes through, lock and
-        all. Point the control dir at a temp dir and the store must appear
-        there — and nowhere else."""
-        before = self._real_store_fingerprint()
+        all. Point the control dir at a temp dir and the store must appear there —
+        and the probe must not be in the real store.
+
+        The assertion is by CONTENT MARKER, not by hash: this box's live store is
+        written by a running fleet, so "the file did not change" would be a flaky
+        accusation. "My record is not in it" is exact.
+        """
+        marker = "seam-probe-not-in-the-real-store"
         probe = (
             "import sys;sys.path.insert(0,%r);"
             "import fleet_children as fc;"
-            "fc.save_lineage({'children': {}});"
-            "print(fc.LINEAGE)" % str(HERE)
+            "fc.save_lineage({'children': {%r: {'name': %r}}});"
+            "print(fc.LINEAGE)" % (str(HERE), marker, marker)
         )
         rc, out, err = run([sys.executable, "-c", probe], cwd=self.tmp, env=self.env)
         self.assertEqual(rc, 0, f"save_lineage failed: {err[-400:]}")
@@ -313,8 +315,12 @@ class TestAFreshStoreActuallyWorks(unittest.TestCase):
         self.assertEqual(written, self.tmp / "c" / "lineage.json",
                          "the store was not written under FLEET_CONTROL_DIR")
         self.assertTrue(written.is_file(), "no store file was created")
-        self.assertEqual(self._real_store_fingerprint(), before,
-                         "writing to a temp control dir changed the real store")
+        self.assertIn(marker, written.read_text(),
+                      "the record did not reach the temp store")
+        real = self._real_store()
+        if real.is_file():
+            self.assertNotIn(marker, real.read_text(errors="replace"),
+                             "a write aimed at a temp control dir landed in the REAL store")
 
     def test_spawn_without_a_repo_says_what_to_set(self):
         """The public-facing half of the changed default: refuse, and name the

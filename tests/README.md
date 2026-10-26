@@ -52,3 +52,44 @@ ship". A second packager, a `tar` step, or a plain `scp` still sees the bytes.
 `check-id path-glob reason` per line. It can silence any check except `secrets`:
 a credential that reached a file cannot be un-leaked by a config line. Suppressed
 findings are still printed, with their reason, under `suppressed` in the JSON.
+
+## Arming a frozen-baseline guard (and how to prove it is armed)
+
+`bin/test_fleet_entries.py` and `bin/test_fleet_gate.py` replay a frozen snapshot of 7 real
+entries and their refusal lists. The snapshot is a copy of a *private* deployment's state, so
+it is not in this repo, and the two modules **skip loudly** without it:
+
+```
+skipped "the frozen baseline is not in this tree (...). ... Skipped, not passed:
+nothing has been verified."
+```
+
+They look for `*20261011*.json` in `bin/fixtures/` or in `$FLEET_GATE_FIXTURES`, and identify
+the two files by **content shape**: the entries baseline is a JSON list, the refusal lists are
+a JSON object. Arm them by pointing that variable at the directory holding both:
+
+```bash
+cd bin && FLEET_GATE_FIXTURES=/path/to/fixtures \
+  python3 -m unittest -v test_fleet_entries test_fleet_gate
+# PASS looks like: 47 tests, OK, 0 skipped, and these three named OKs:
+#   test_seven_frozen_entries_are_byte_identical
+#   test_the_seven_refusal_lists_are_word_for_word
+#   test_the_guard_can_actually_fail   (perturbs one entry and notices)
+```
+
+**A pass is not evidence until you have seen the guard fail.** Two failures worth running,
+because they fail for different reasons:
+
+| perturbation | expected |
+|---|---|
+| rename the fixtures so no filename carries the frozen date | **skip**, loudly, naming the directory — never a pass |
+| change one entry's `name` (a DERIVED field: the namer derives it from the worktree) | byte-identity, round-trip **and** word-for-word refusals all fail |
+| flip one entry's `merged` in the entries baseline | the *refusal lists* fail — the two files disagree about the same fleet |
+
+**The trap.** Editing a RAW input field — `head`, `branch` — does **not** fail byte-identity,
+because `baseline_inputs()` reconstructs those inputs *from* the baseline: you changed both
+sides of the comparison and proved nothing. Measured, not assumed: with `head` rewritten to 40
+zeros the suite still reports `OK`. Only a *derived* field, or a disagreement between the two
+files, can show the guard working. If you ever "prove" a guard can fail by editing what it
+reconstructs, you have produced a false green — which is the exact failure the guard exists to
+prevent, one level up.

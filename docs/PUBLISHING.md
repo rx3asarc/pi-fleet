@@ -145,16 +145,32 @@ required for a scoped package to be installable by anyone. Then re-verify with
 ## 6. Measured state of the test suite at this commit
 
 ```bash
+# on a clean clone (no bin/fixtures/, no external corpus)
 python3 -m unittest discover -s bin -p 'test_*.py'
-# Ran 758 tests in 24.198s
-# FAILED (failures=1, errors=9)
+# Ran 805 tests in 17.200s
+# FAILED (failures=1, skipped=19)
+
+# with the frozen baseline armed (FLEET_GATE_FIXTURES, or bin/fixtures/)
+# Ran 805 tests in 19.421s
+# FAILED (failures=1)
 ```
 
-33 test files, 3 of them red: `test_fleet_entries.py` and `test_fleet_gate.py` compare
-against `bin/fixtures/*.json`, which is deliberately unpublished (it is this project's own
-session state), and `test_fleet_scrub.py` fails on a corpus file outside the repo. The
-number is recorded rather than smoothed: a clean clone is expected to show those three red
-until the fixtures question is settled.
+Denominator, stated once: **801 test methods** is the count on the tree the scrub branch
+started from, everything included. The current tree shows **805** because the brief-issue fix
+added four. Subtests are not a denominator (309 subtest passes ride inside those methods), and
+an earlier figure of 829 in the ship-readiness audit could not be reproduced from any tree on
+this box — it is withdrawn rather than explained.
+
+One red is expected and is not a defect in this tree: `test_fleet_scrub.py` asserts zero false
+positives over a corpus *outside* the repo (operator handoff notes). On a machine without that
+corpus it passes; here it fails, correctly, because the corpus contains an assignment the rule
+is built to catch. It is not allowlisted.
+
+The 19 skips are `test_fleet_entries.py` and `test_fleet_gate.py` declining to run because
+`bin/fixtures/*.json` is deliberately unpublished (it is a copy of a private deployment's real
+state, not an example). They **skip loudly**, naming the path they looked for, and say in the
+message that nothing has been verified — a guard that passes vacuously is the failure mode
+this arrangement exists to avoid. To arm them, see `tests/README.md`.
 
 ## 7. Pre-flight checklist before the first public push
 

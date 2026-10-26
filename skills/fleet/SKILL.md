@@ -60,7 +60,16 @@ The done-test must be able to fail; `true` is not a test.
 - `--kind code` (default) gives worktree + branch; `--kind task` gives a scratch dir and
   no branch, for research.
 - `--repo`, `--branch`, `--base`, `--model` override the defaults.
-- Keep it to at most 5 concurrent workers in one domain; workers are `meta-<role>-<n>`.
+- `--domain <d>` records the domain as a **field** on the lineage row. The **name is the
+  subject** (`audit-1`, `theme-dup-create-01`) and does not have to carry a domain at all;
+  the domain is data, and the 5-worker cap is counted from that field. Without `--domain`,
+  a name that still starts with one of the example domains is read as declaring one, and
+  any other name records no domain at all — nothing is invented on your behalf.
+- `--over-cap` spawns even when the domain is at the cap. The exception records itself as
+  `domain_cap_override` on the row; there is no silent sixth worker.
+- The domain set is an example, not a law: `FLEET_DOMAINS=web,data,infra` replaces the
+  five defaults for the process that spawns. (A `sk-` credential scanner matches inside a
+  domain name that ends in `sk-`; allowlist the domain rather than renaming it.)
 
 ### `fleet list` — who exists, and in what state
 

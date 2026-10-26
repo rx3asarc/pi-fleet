@@ -156,7 +156,10 @@ class TestSpawnRefusesBeforeItDoesAnything(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        path = "/root/.pi/agent/bin/fleet"
+        # The REPO'S OWN fleet, resolved from this file. A test in a package that
+        # ships cannot read /root/.pi/agent/bin: that path exists on exactly one
+        # machine, and on that machine it is a copy this repo does not own.
+        path = str(pathlib.Path(__file__).resolve().parent / "fleet")
         loader = importlib.machinery.SourceFileLoader("fleetmod", path)
         spec = importlib.util.spec_from_loader("fleetmod", loader)
         cls.fleet = importlib.util.module_from_spec(spec)

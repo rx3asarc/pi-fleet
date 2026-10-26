@@ -115,12 +115,15 @@ PLAN
 The done-test above fails before the work and passes after it — that is the whole point of
 freezing it at spawn time rather than accepting the worker's word.
 
-**The name is the subject; the domain is a field.** `docs-1` is a fine name — it says what
-the worker is for. A category word in front of it (`meta-docs-1`, `tmp-docs-1`) says nothing
-the shorter name did not, and `bin/fleet_name_lint.py` reports it as a violation. The domain
-is passed as `--domain docs` (or read from the name prefix when you do not pass one) and is
-what the per-domain cap counts, so keep at most five running in one domain and you can
-still read their reports.
+**The name is the subject; the domain is a field.** Workers are named after what they ARE
+(`docs-1`, `audit-1`, `theme-dup-create-01`). A category word in front of the subject
+(`meta-docs-1`, `tmp-docs-1`) says nothing the shorter name did not, and
+`bin/fleet_name_lint.py` reports it as a violation. The domain is a separate field: pass
+`--domain <d>` when you spawn, and `fleet` counts at most five live workers per domain from
+that field, refusing the sixth unless you pass `--over-cap` (which records the exception on
+the row). A name prefix is read as the domain only for legacy rows that carry no domain
+field, and a spawn that gives neither stays unscoped — a worker in no domain at all, which
+is legal and is not counted against a bucket nobody chose.
 
 ## Reporting
 

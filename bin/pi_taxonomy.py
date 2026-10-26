@@ -35,7 +35,8 @@ import os
 import re
 
 __all__ = ["resolve", "validate_name", "audit_names", "WORKING_LIMIT",
-           "GENERIC_DIRS", "KNOWN_DOMAINS"]
+           "GENERIC_DIRS", "KNOWN_DOMAINS", "DEFAULT_DOMAINS", "known_domains",
+           "declared_domain", "looks_like_a_subject"]
 
 # Directories that say nothing about what a session is about. `/root` is the
 # important one: Maestro always works there, which is exactly why every session
@@ -46,9 +47,41 @@ GENERIC_DIRS = frozenset({
     "node_modules", "pi", "projects",
 })
 
-# Domains this fleet actually uses. A prefix that is not one of these is not a
-# domain -- which is why `alder-gale` is unscoped rather than domain `alder`.
+# THE EXAMPLE DOMAIN SET, NOT A VALIDATION RULE (naming change, 2026-10-26).
+# The name is the SUBJECT and the domain is a separate FIELD (`fleet spawn --domain
+# <d>`), so this tuple is no longer read out of a name to decide whether the name is
+# legal. It is the default set a spawner may choose from, and it ships as an EXAMPLE
+# an operator replaces wholesale:
+#
+#     FLEET_DOMAINS=web,data,infra      # known_domains() returns these instead
+#
+# The five values stay as the default because this box runs on them: deleting them
+# would make every existing `<domain>-...` name resolve to `unscoped` overnight, and
+# the template `<domain>-<topic>-<seq>` is an example of a name, never a requirement.
+# A prefix that is not in the set is simply not a domain -- which is why `alder-gale`
+# is a subject, not domain `alder`.
+#
+# CONSEQUENCE, recorded because it is a real false positive and someone will hit it:
+# a naive secret scanner that greps for `sk-` matches INSIDE `nordisk-`, so a live
+# fleet name in this set can look like a leaked API key. The fix belongs in the
+# scanner's allowlist (`nordisk-*`), never in a rename of the domain.
 KNOWN_DOMAINS = ("nordisk", "engrane", "enc1", "meta", "infra")
+
+# What the default set is, spelled out separately so `known_domains()` can be
+# overridden without anyone having to mutate a module constant.
+DEFAULT_DOMAINS = KNOWN_DOMAINS
+
+
+def known_domains():
+    """The accepted domain set: $FLEET_DOMAINS (comma-separated), else the example set.
+
+    Read at CALL time, not import time, so an operator can set it in the same shell
+    they spawn in, and a test can prove the override works without re-importing this
+    module under a different name.
+    """
+    raw = os.environ.get("FLEET_DOMAINS", "")
+    vals = tuple(v.strip().lower() for v in str(raw).split(",") if v.strip())
+    return vals or DEFAULT_DOMAINS
 
 # Name shapes that carry a fixed meaning beyond <domain>-<topic>.
 SUBTOPIC_ALIASES = {
@@ -101,7 +134,7 @@ def _from_name(name: str):
     if len(tokens) < 2:
         return None
     domain = tokens[0]
-    if domain not in KNOWN_DOMAINS:
+    if domain not in known_domains():
         return None
 
     rest = tokens[1:]
@@ -163,9 +196,10 @@ def _from_path(path: str):
     tokens = [t for t in base.split("-") if t]
     if not tokens:
         return None
-    if tokens[0] in KNOWN_DOMAINS:
+    known = known_domains()
+    if tokens[0] in known:
         return tokens[0], "-".join(tokens[1:]), ""
-    if base in KNOWN_DOMAINS:
+    if base in known:
         return base, "", ""
     return None
 
@@ -175,7 +209,7 @@ def _from_message(message: str):
     text = _norm(message)
     if not text:
         return None
-    for domain in KNOWN_DOMAINS:
+    for domain in known_domains():
         if domain in text:
             return domain, "", ""
     # The storefront work is referred to by its own vocabulary.
@@ -256,19 +290,60 @@ if __name__ == "__main__":  # tiny manual probe; the tests are the contract
             print(json.dumps(resolve(json.loads(line))))
 
 
-# ── the naming contract (U8) ─────────────────────────────────────────────────
+# ── the naming contract (U8; retitled by the 2026-10-26 naming change) ─────────
+
+# THE NAME IS THE SUBJECT; THE DOMAIN IS A FIELD. Until 2026-10-26 the rule was
+# `<domain>-<role>-<n>`, which made the domain a PREFIX -- so `meta` became a roster
+# bucket that means nothing outside cap arithmetic, and a stranger could not name a
+# worker anything. Now the domain is recorded as data (`fleet spawn --domain <d>`,
+# `fleet_door.decide()`), and the name only has to say what the session IS.
 
 # How many live sessions one domain may have before a spawn starts complaining.
 # It is deliberately a WARNING threshold, never a gate: blocking a spawn teaches
-# people to work around the tool, and then the tool stops seeing reality.
+# people to work around the tool, and then the tool stops seeing reality. It is a
+# DIFFERENT number from the hard cap (`fleet_door.CAP_PER_DOMAIN`, 5 workers per
+# domain, counted from the `domain` FIELD and enforced in the door AND in `fleet
+# spawn`); this one is the nudge that names the session worth retiring.
 WORKING_LIMIT = 3
 
-_NAME_HELP = (
-    "names are <domain>-<topic>[-<subtopic>][-<seq>], with domain one of "
-    + ", ".join(KNOWN_DOMAINS)
-    + " -- e.g. nordisk-theme-dup-create-01. "
-    "Pass --unscoped to spawn anyway."
-)
+# What a name looks like when it is a worker rather than a chat topic: a subject,
+# then a sequence number. See `looks_like_a_subject`.
+SUBJECT_RE = re.compile(r"^(?=.{2,64}$)[a-z0-9]+(?:-[a-z0-9]+)*-(?:\d{1,4})$")
+
+
+def looks_like_a_subject(name) -> bool:
+    """`audit-1` / `theme-dup-create-01` -- yes. `marrow` / `alder-ember` -- no.
+
+    With the domain moved into a field, a name no longer has to carry one, so the
+    question `validate_name` asks is narrower and more honest: does this name name
+    a SUBJECT? A subject plus a sequence does. A bare word, or a random two-word
+    pair, is the shape the old namer produced when it had nothing to go on -- eight
+    of those names collided across 3-4 files each -- so they are still refused
+    unless the spawner says `--unscoped` or passes `--domain` explicitly.
+    """
+    return bool(SUBJECT_RE.match(_norm(name)))
+
+
+def declared_domain(name):
+    """The domain a name still DECLARES by prefix, or None.
+
+    Legacy reading, kept for rows written before the domain was a field: those
+    carry it only in the name. `fleet spawn` records it as the field's source so
+    the cap has something true to count instead of silently counting nothing.
+    """
+    parts = _from_name(name)
+    return parts[0] if parts else None
+
+
+def _name_help():
+    """The refusal's explanation, built at CALL time so FLEET_DOMAINS shows up in it."""
+    return (
+        "names are subjects: <subject>[-<seq>], e.g. 'audit-1' or "
+        "'theme-dup-create-01'. The domain is a FIELD, not a prefix -- pass "
+        "--domain <d> (defaults: " + ", ".join(known_domains()) + "; override "
+        "with FLEET_DOMAINS=comma,separated). Pass --unscoped to spawn a bare word "
+        "anyway."
+    )
 
 
 def _ts(value):
@@ -290,34 +365,55 @@ def _read_state(row):
     return state if isinstance(state, str) and state else None
 
 
-def validate_name(name, live_rows=(), unscoped=False):
+def validate_name(name, live_rows=(), unscoped=False, domain=None):
     """May this name be spawned? Pure: live rows are passed in.
 
     Returns a decision, never raises:
 
         ok             may the spawn proceed
-        domain/topic/subtopic   what the name declares
+        domain         the domain as DATA: the `domain` argument (a field), else what
+                       the name still declares by prefix, else None
+        domain_source  'field' | 'name prefix' | None -- where that domain came from
+        subject        the subject the name states, or None
+        topic/subtopic what a domain-carrying name declares (legacy shape)
         error          why not (None when ok)
         warning        the working limit was exceeded (never a refusal)
         accelerate     the oldest idle session in the domain, or None
         live_in_domain how many are already live there
+
+    A name is accepted when ANY of these holds: a domain was passed as a FIELD (then
+    the name is free to be a subject and nothing else), the name still carries a
+    known-domain prefix, the name is subject-shaped (`<subject>-<seq>`), or the
+    caller says `unscoped=True`. So nobody is FORCED to carry a domain in the name.
 
     Over the limit is a warning, not an error, and `accelerate` is DERIVED rather
     than stored: the condition is computable from live rows at any time, so no
     new state and no new writer is needed to remember it.
     """
     parsed = _from_name(name) or (None, None, None)
+    field_dom = _norm(domain) or None
     out = {
         "name": name, "ok": True,
-        "domain": parsed[0], "topic": parsed[1], "subtopic": parsed[2],
+        "domain": parsed[0] or field_dom,
+        "domain_source": ("field" if field_dom
+                          else ("name prefix" if parsed[0] else None)),
+        "subject": None,
+        "topic": parsed[1], "subtopic": parsed[2],
         "error": None, "warning": None, "accelerate": None,
         "live_in_domain": 0,
     }
 
-    if not out["domain"]:
-        if not unscoped:
-            out["ok"] = False
-            out["error"] = f"unscoped name: {name!r}. {_NAME_HELP}"
+    if not str(name or "").strip():
+        out["ok"] = False
+        out["error"] = "empty name: a worker needs a name. " + _name_help()
+        return out
+
+    if looks_like_a_subject(name):
+        out["subject"] = _norm(name).rsplit("-", 1)[0]
+
+    if not (out["domain"] or out["subject"] or unscoped):
+        out["ok"] = False
+        out["error"] = f"unscoped name: {name!r}. " + _name_help()
         return out
 
     live = [
@@ -327,7 +423,7 @@ def validate_name(name, live_rows=(), unscoped=False):
     ]
     out["live_in_domain"] = len(live)
 
-    if len(live) < WORKING_LIMIT:
+    if not out["domain"] or len(live) < WORKING_LIMIT:
         return out
 
     out["warning"] = (
@@ -358,6 +454,11 @@ def audit_names(rows):
     The audit refuses nothing -- those sessions are already running. It answers the
     other half of the same question: which live names would be refused today, and
     which domains are over the working limit and by whose retirement.
+
+    `unscoped` means the DOMAIN IS NOT RECORDED, which is the health metric: it
+    lists a name that would be refused today (`marrow`) alongside a legal
+    subject-only worker (`audit-1`) whose spawner passed no domain. Both are
+    unnamed-domain sessions; `fleet spawn --domain` is how one gets a domain.
 
     This exists so spawn and the audit view share ONE law about names. Two
     components each deciding "is this a good name" is how they start disagreeing.

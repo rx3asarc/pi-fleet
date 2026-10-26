@@ -116,78 +116,78 @@ Measured on the copy with `grep -c '/root/'` and a vocabulary scan (`nordisk|eng
 numbers a readiness checker will trip over; recording them here so no later unit has
 to guess.
 
-| included file | literal `/root/` hits | internal-vocab hits |
+| included file | literal `/root/` occurrences | internal-vocab terms found |
 |---|---:|---|
 | `fleet` | 2 | engrane |
-| `fleet-pid-assert-cron.sh` | 3 | - |
-| `fleet-sentinel-cron.sh` | 7 | - |
-| `fleet-tmux-orphan-cron.sh` | 3 | - |
+| `fleet-pid-assert-cron.sh` | 3 | none |
+| `fleet-sentinel-cron.sh` | 7 | none |
+| `fleet-tmux-orphan-cron.sh` | 3 | none |
 | `fleet_ack.py` | 0 | nordisk |
-| `fleet_audit.py` | 2 | - |
-| `fleet_brief.py` | 0 | - |
-| `fleet_bundle.py` | 5 | - |
+| `fleet_audit.py` | 2 | none |
+| `fleet_brief.py` | 0 | none |
+| `fleet_bundle.py` | 5 | none |
 | `fleet_children.py` | 11 | engrane,nordisk |
 | `fleet_discovery.py` | 2 | engrane,hc_volume_105587324 |
-| `fleet_done_test.py` | 1 | - |
+| `fleet_done_test.py` | 1 | none |
 | `fleet_door.py` | 0 | engrane |
 | `fleet_entries.py` | 0 | engrane |
 | `fleet_gate.py` | 0 | engrane |
 | `fleet_ground_truth.py` | 0 | nordisk |
-| `fleet_lineage.py` | 0 | - |
-| `fleet_name_drift.py` | 1 | - |
+| `fleet_lineage.py` | 0 | none |
+| `fleet_name_drift.py` | 1 | none |
 | `fleet_pid_assert.py` | 1 | engrane |
-| `fleet_policy.py` | 0 | - |
-| `fleet_reader.py` | 0 | - |
-| `fleet_restore.py` | 11 | - |
+| `fleet_policy.py` | 0 | none |
+| `fleet_reader.py` | 0 | none |
+| `fleet_restore.py` | 11 | none |
 | `fleet_resume_dark.py` | 0 | engrane,maestro,nordisk |
-| `fleet_rollup.py` | 0 | - |
-| `fleet_scrub.py` | 2 | - |
-| `fleet_tmux_orphan_guard.py` | 1 | - |
-| `fleet_util.py` | 2 | - |
+| `fleet_rollup.py` | 0 | none |
+| `fleet_scrub.py` | 2 | none |
+| `fleet_tmux_orphan_guard.py` | 1 | none |
+| `fleet_util.py` | 2 | none |
 | `pi-live` | 0 | maestro |
 | `pi-msg` | 2 | nordisk |
-| `pi-peers` | 0 | - |
+| `pi-peers` | 0 | none |
 | `pi-tmux` (from /root/bin) | 2 | none |
 | `pi-tree` | 0 | nordisk |
 | `pi_identity.py` | 0 | engrane |
 | `pi_index.py` | 0 | engrane |
-| `pi_rows.py` | 0 | - |
-| `pi_sources.py` | 1 | - |
+| `pi_rows.py` | 0 | none |
+| `pi_sources.py` | 1 | none |
 | `pi_taxonomy.py` | 0 | enc1,engrane,maestro,nordisk |
 | `pi_view.py` | 0 | maestro |
 | `test_fleet_ack.py` | 1 | nordisk |
 | `test_fleet_audit.py` | 0 | engrane |
-| `test_fleet_brief.py` | 1 | - |
+| `test_fleet_brief.py` | 1 | none |
 | `test_fleet_bundle.py` | 1 | engrane |
 | `test_fleet_children.py` | 3 | engrane,nordisk |
-| `test_fleet_claims.py` | 3 | - |
+| `test_fleet_claims.py` | 3 | none |
 | `test_fleet_dismiss_semantics.py` | 2 | engrane |
 | `test_fleet_door.py` | 1 | engrane |
 | `test_fleet_entries.py` | 0 | engrane,hc_volume_105587324,nordisk |
-| `test_fleet_faults.py` | 2 | - |
+| `test_fleet_faults.py` | 2 | none |
 | `test_fleet_gate.py` | 0 | engrane |
 | `test_fleet_identity.py` | 1 | engrane |
 | `test_fleet_integrity.py` | 1 | engrane |
 | `test_fleet_lineage.py` | 1 | engrane |
-| `test_fleet_lock.py` | 0 | - |
+| `test_fleet_lock.py` | 0 | none |
 | `test_fleet_p0.py` | 2 | engrane |
 | `test_fleet_policy.py` | 1 | maestro |
-| `test_fleet_reader.py` | 1 | - |
+| `test_fleet_reader.py` | 1 | none |
 | `test_fleet_reconcile.py` | 1 | nordisk |
 | `test_fleet_restore.py` | 3 | engrane |
 | `test_fleet_resume_dark.py` | 1 | engrane |
-| `test_fleet_rollup.py` | 1 | - |
-| `test_fleet_scan.py` | 1 | - |
+| `test_fleet_rollup.py` | 1 | none |
+| `test_fleet_scan.py` | 1 | none |
 | `test_fleet_scrub.py` | 11 | engrane,nordisk |
 | `test_fleet_sweep_lineage.py` | 1 | engrane |
-| `test_fleet_verify_binding.py` | 1 | - |
+| `test_fleet_verify_binding.py` | 1 | none |
 | `test_name_contract.py` | 1 | engrane,nordisk |
 | `test_pi_identity.py` | 1 | engrane,nordisk |
 | `test_pi_index.py` | 0 | engrane,hc_volume_105587324,nordisk |
-| `test_pi_sources.py` | 0 | - |
+| `test_pi_sources.py` | 0 | none |
 | `test_pi_taxonomy.py` | 1 | engrane,hc_volume_105587324,nordisk |
 | `test_pi_view.py` | 0 | engrane,nordisk |
-| `test_sentinel_cron_lock.py` | 2 | - |
+| `test_sentinel_cron_lock.py` | 2 | none |
 
 ## Known breakage after copy
 

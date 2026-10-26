@@ -82,10 +82,12 @@ def _writer_emits_enrolled_source():
 
 import re
 
+import fleet_paths  # noqa: E402  (the one place that resolves locations)
+
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
-DEFAULT_LINEAGE = Path("/root/.fleet/lineage.json")
-DEFAULT_LEDGER = Path("/root/.fleet/reap-ledger.jsonl")
+DEFAULT_LINEAGE = fleet_paths.control_dir() / "lineage.json"
+DEFAULT_LEDGER = fleet_paths.control_dir() / "reap-ledger.jsonl"
 
 
 class Check:

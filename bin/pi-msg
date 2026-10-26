@@ -21,8 +21,12 @@
 # --wake to wake it (its registration returns once it runs a turn), or --force
 # to deliberately accept a dead letter.
 set -uo pipefail
-CLI="/root/.pi/agent/npm/node_modules/pi-intercom/cli.ts"
-TSX="/root/.pi/agent/npm/node_modules/tsx/dist/cli.mjs"
+# The agent home is pi's, and `fleet_paths.agent_home()` owns that decision in
+# python. A shell script cannot import it, so it spells the same rule: PI_AGENT_HOME
+# wins, else $HOME/.pi/agent. (test_fleet_paths.py asserts the two agree.)
+AGENT_HOME="${PI_AGENT_HOME:-${HOME}/.pi/agent}"
+CLI="${AGENT_HOME}/npm/node_modules/pi-intercom/cli.ts"
+TSX="${AGENT_HOME}/npm/node_modules/tsx/dist/cli.mjs"
 [ -f "$CLI" ] || { echo "pi-intercom not installed at $CLI" >&2; exit 1; }
 
 # `ls` is a nicety for muscle memory

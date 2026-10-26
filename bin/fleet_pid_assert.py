@@ -19,7 +19,9 @@ import os
 import sys
 import time
 
-LINEAGE = "/root/.fleet/lineage.json"
+import fleet_paths
+
+LINEAGE = str(fleet_paths.control_dir() / "lineage.json")
 TERMINAL_VERDICTS = {"dismissed", "reaped", "done", "closed", "reap-failed"}
 PROTECTED_HINTS = ("fork",)
 

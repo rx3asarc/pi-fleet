@@ -21,6 +21,7 @@ which is correct by luck and meaningless to a human -- a session with no branch
 has no branch state to be "not merged".
 """
 import json
+import os
 import unittest
 from pathlib import Path
 
@@ -30,13 +31,41 @@ FIXTURES = Path(__file__).parent / "fixtures"
 ENTRIES = FIXTURES / "engrane_baseline_20261011.json"
 REFUSALS = FIXTURES / "engrane_gate_baseline_20261011.json"
 
+FIXTURES_MISSING = (
+    f"the frozen gate fixtures are not in this tree ({FIXTURES}). They are a copy of "
+    "a PRIVATE project's 7 entries (its session names, branches and refusals), so they "
+    "are excluded from the shipped repo on purpose: shipping them would publish another "
+    "project's state. This guard is therefore unarmed here and must be armed by whoever "
+    "has the data — copy `fixtures/engrane_*_20261011.json` out of the private "
+    "deployment's bin/ into bin/fixtures/ (or set FLEET_GATE_FIXTURES to their directory) "
+    "and re-run. Skipped, not passed: nothing here has been verified."
+)
+
+elsewhere = os.environ.get("FLEET_GATE_FIXTURES")
+if elsewhere:
+    ENTRIES = Path(elsewhere) / ENTRIES.name
+    REFUSALS = Path(elsewhere) / REFUSALS.name
+
+
+class FixturesNeeded(unittest.TestCase):
+    """A base class so the guard does not pass by being quietly vacuous.
+
+    The skip is raised per test, not per class, so the count says how many guards
+    are unarmed (`skipped=11`) instead of folding them into one line.
+    """
+
+    def setUp(self):
+        missing = [p.name for p in (ENTRIES, REFUSALS) if not p.is_file()]
+        if missing:
+            raise unittest.SkipTest(FIXTURES_MISSING + " missing: " + ", ".join(missing))
+
+
 BASE = "origin/main"
 
 
 def engrane_entries():
     """The 7 frozen entries, as build_entries emitted them."""
     return json.loads(ENTRIES.read_text())
-
 
 def session_entry(**kw):
     """A session-class entry: alive, no worktree, no branch.
@@ -54,7 +83,7 @@ def session_entry(**kw):
 
 
 # ── the guard ────────────────────────────────────────────────────────────────
-class TestGitClassUnchanged(unittest.TestCase):
+class TestGitClassUnchanged(FixturesNeeded):
     """No behaviour change for the git class. Pinned before the refactor."""
 
     def test_the_seven_refusal_lists_are_word_for_word(self):
@@ -147,7 +176,7 @@ class TestSessionClassRefusals(unittest.TestCase):
 
 
 # ── ownership must be proven before anything is killed ───────────────────────
-class TestOwnershipBeforeTheKill(unittest.TestCase):
+class TestOwnershipBeforeTheKill(FixturesNeeded):
     """Two independent resolutions must agree before a tmux session dies.
 
     `session` is what the index resolved (join on pane_pid). `owner_tmux` is what

@@ -23,14 +23,38 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fleet_entries  # noqa: E402
+import fleet_paths    # noqa: E402
 import pi_index       # noqa: E402
 import pi_sources     # noqa: E402
 from fleet_util import clip, die, sh  # noqa: E402,F401
 
-REPO = Path(os.environ.get("FLEET_REPO", "/mnt/HC_Volume_105587324/projects/engrane"))
+# THE REPO TARGET IS RESOLVED, NOT ASSUMED. This used to be a private project's
+# absolute path, which meant a fresh clone pointed at somebody else's tree and
+# said nothing about it. `fleet_paths.repo()` is $FLEET_REPO, else the repository
+# you are standing in; None is an honest answer, and the git source is skipped
+# (loudly, once) rather than run against a guess.
+REPO = fleet_paths.repo()
 BASE = os.environ.get("FLEET_BASE", "origin/main")
-REGISTRY = Path(os.environ.get("FLEET_REGISTRY", "/root/.fleet/registry.json"))
-TRUST = Path("/root/.pi/agent/trust.json")
+REGISTRY = Path(os.environ.get("FLEET_REGISTRY") or fleet_paths.control_dir() / "registry.json")
+TRUST = Path(os.environ.get("FLEET_TRUST") or fleet_paths.agent_home() / "trust.json")
+
+_repo_hint_printed = False
+
+
+def repo_target(stream=None):
+    """The repo to ask about, or None after saying once what to set.
+
+    Silence was the old behaviour and it was the bug: `fleet list` against no
+    target looked exactly like a fleet with no worktrees.
+    """
+    global _repo_hint_printed
+    if REPO is not None:
+        return REPO
+    if not _repo_hint_printed:
+        _repo_hint_printed = True
+        print(f"  ! {fleet_paths.REPO_HINT} — worktree discovery from git is off; "
+              f"session discovery still runs", file=stream or sys.stderr)
+    return None
 
 
 def git_worktrees(repo: Path):
@@ -76,7 +100,8 @@ def git_facts(wt: str, base: str, repo: Path):
 
     # merged? (HEAD is an ancestor of base)
     if f["head"]:
-        rc, _, _ = sh(["git", "-C", repo, "merge-base", "--is-ancestor", f["head"], base])
+        rc, _, _ = sh(["git", "-C", str(repo or wt), "merge-base", "--is-ancestor",
+                       f["head"], base])
         f["merged"] = (rc == 0)
 
     # unpushed: compare against the remote-tracking ref if it exists
@@ -142,7 +167,7 @@ def discover_worktrees(reg):
     hide the others.
     """
     sources = (
-        ("git", lambda: git_worktrees(REPO)),
+        ("git", lambda: git_worktrees(repo_target()) if repo_target() else []),
         # Worktrees git no longer reports, but the registry still remembers.
         ("registry", lambda: [{"path": m.get("worktree"), "branch": m.get("branch")}
                                for m in reg.values() if m.get("worktree")]),
@@ -229,10 +254,15 @@ def entries():
 
 
 def derive_name(worktree: str) -> str:
-    """`/path/engrane-foo` under a repo named `engrane` -> `foo`."""
+    """`/path/engrane-foo` under a repo named `engrane` -> `foo`.
+
+    With no resolved repo there is no prefix to strip, so the directory name is
+    the name: better a name with a prefix than a name derived from a repository
+    nobody asked for.
+    """
     stem = Path(worktree).name
-    prefix = REPO.name + "-"
-    return stem[len(prefix):] if stem.startswith(prefix) else stem
+    prefix = (REPO.name + "-") if REPO is not None else ""
+    return stem[len(prefix):] if prefix and stem.startswith(prefix) else stem
 
 
 def meta_name(worktree: str) -> str:

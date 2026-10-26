@@ -60,12 +60,18 @@ import subprocess
 import sys
 import time
 
+import fleet_paths
+
+# Every location below is resolved, once, from the one seam. HOME stays for the
+# things that genuinely belong to the user rather than to pi.
 HOME = os.path.expanduser("~")
-GUARD = os.path.join(HOME, ".pi/agent/bin/fleet_tmux_orphan_guard.py")
-RESPAWN = os.path.join(HOME, ".pi/agent/bin/respawn-pi-session")
-RECORDS = os.path.join(HOME, ".pi/agent/session-watch/records")
-NAMES = os.path.join(HOME, ".pi/agent/session-names")
-SESSIONS = os.path.join(HOME, ".pi/agent/sessions")
+_AGENT = str(fleet_paths.agent_home())
+_BIN = str(fleet_paths.bin_dir())
+GUARD = os.path.join(_BIN, "fleet_tmux_orphan_guard.py")
+RESPAWN = os.path.join(_BIN, "respawn-pi-session")
+RECORDS = os.path.join(_AGENT, "session-watch", "records")
+NAMES = os.path.join(_AGENT, "session-names")
+SESSIONS = os.path.join(_AGENT, "sessions")
 
 PREFIX_HASH_BYTES = 64 * 1024   # rewrite detector: enough to be a fingerprint
 # SIGTERM is a REQUEST, and pi's graceful path is slow on this box: measured
@@ -568,7 +574,7 @@ def plan_steps(row, report=None):
     pid = row["pid"]
     name = row.get("name") or ""
     tpath = row.get("transcript") or ""
-    cwd = row.get("cwd") or "/root"
+    cwd = row.get("cwd") or str(fleet_paths.home())
     socket = reachable_socket(report or {})
     steps = [
         ("0. preflight (read-only)",

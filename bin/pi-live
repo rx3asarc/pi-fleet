@@ -41,8 +41,9 @@
 
 const { writeSync } = require("node:fs");
 const { join } = require("node:path");
+const os = require("node:os");
 
-const HOME = process.env.HOME || "/root";
+const HOME = process.env.HOME || os.homedir();
 // Find the core next to THIS script first, under $HOME second.
 //
 // `$HOME/.pi/agent/...` looked equivalent because on Maestro's box the two are the

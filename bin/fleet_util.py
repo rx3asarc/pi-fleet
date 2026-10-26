@@ -15,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import fleet_paths
+
 
 def sh(args, cwd=None, check=False):
     """Run a command, return (rc, stdout, stderr). Never raises on rc!=0."""
@@ -61,11 +63,11 @@ def die(msg):
 
 
 # ── the store lock ───────────────────────────────────────────────────────────
-# Every verb that mutates /root/.fleet does an unlocked read-modify-write of a
+# Every verb that mutates the control dir does an unlocked read-modify-write of a
 # whole JSON file. Cron, a human tick and any number of forks can overlap, and
 # the loser's ledger row vanishes while its pane is already dead. One advisory
 # lock around the mutate path, taken on a file that is never the store itself.
-LOCK_PATH = Path(os.environ.get("FLEET_LOCK", "/root/.fleet/.lineage.lock"))
+LOCK_PATH = Path(os.environ.get("FLEET_LOCK") or fleet_paths.control_dir() / ".lineage.lock")
 
 
 _depth = 0

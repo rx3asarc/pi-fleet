@@ -28,6 +28,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fleet_paths  # noqa: E402
 
 __all__ = ["WRITER", "WRITERS", "canonical_name", "plan_repair", "apply_repair",
            "offenders"]
@@ -48,7 +52,7 @@ WRITERS = {
     "extensions/session-namer.ts":
         "CREATES records on every naming event. Not repair; it is the origin.",
 }
-REGISTRY_DIR = os.path.join(os.path.expanduser("~"), ".pi/agent/session-names")
+REGISTRY_DIR = os.path.join(str(fleet_paths.agent_home()), "session-names")
 
 # Fields repair may never touch. Repair moves identity, not history.
 HISTORY = ("topic", "startedAt", "updatedAt", "pid", "pidStart", "tty", "cwd")

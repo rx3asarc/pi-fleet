@@ -25,12 +25,14 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import fleet_paths  # noqa: E402
+
 
 def _live_names():
     """sessionId -> the name the world uses (registry first, then tmux pane)."""
     out = {}
     try:
-        reg = json.loads(open("/root/.fleet/registry.json").read())
+        reg = json.loads((fleet_paths.control_dir() / "registry.json").read_text())
     except Exception:
         reg = {}
     for key, row in reg.items():

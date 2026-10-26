@@ -765,11 +765,15 @@ main() {
   # failure mode the lineage store exists to prevent. Best-effort and detached --
   # a failed enrol must never delay or break an interactive launch. Opt out with
   # FLEET_AUTO_ADOPT=0.
-  if [ "${FLEET_AUTO_ADOPT:-1}" != 0 ] && [ -x /root/.pi/agent/bin/fleet ]; then
+  # `fleet` is the CLI that lives NEXT TO THIS SCRIPT, not one at a fixed path:
+  # a package installed anywhere must adopt through its own copy (FLEET_BIN_DIR
+  # overrides, and fleet_paths.bin_dir() uses the same rule in python).
+  FLEET_BIN="${FLEET_BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+  if [ "${FLEET_AUTO_ADOPT:-1}" != 0 ] && [ -x "$FLEET_BIN/fleet" ]; then
     local _fparent="${PI_SESSION_ID:-${PI_INTERCOM_SESSION_ID:-}}"
     (
       for _ in $(seq 1 30); do
-        if FLEET_ENROLLED_SOURCE=pi-tmux-adopt /root/.pi/agent/bin/fleet adopt "$name" \
+        if FLEET_ENROLLED_SOURCE=pi-tmux-adopt "$FLEET_BIN/fleet" adopt "$name" \
              --unit "${FLEET_SPAWN_UNIT:-unenrolled: opened by pi-tmux}" \
              ${_fparent:+--parent "$_fparent"} \
              >>"$LAUNCH_DIR/$name.adopt.log" 2>&1; then

@@ -9,7 +9,7 @@ THE CONTRACT (unchanged from U2, and the reason this file is thin)
     Every reader returns its source in its NATIVE shape and keys NOTHING.
     tmux panes    [{"session_name", "pane_pid", "cwd"}]
     pi-live       the durable ledger, one record per session
-    registry      /root/.pi/agent/session-names/*.json, as written
+    registry      <agent home>/session-names/*.json, as written
     fleet         whatever the `fleet` CLI prints -- entries, NOT rows
     Reconciliation is `pi_index.build_index`, which is pure and fixture-tested.
     Anything clever in here would be untestable by construction.
@@ -36,11 +36,18 @@ __all__ = [
     "read_panes", "read_registry", "read_fleet", "load_sources", "live_records",
 ]
 
-HOME = os.path.expanduser("~")
-REGISTRY_DIR = os.path.join(HOME, ".pi/agent/session-names")
-PI_LIVE = os.path.join(HOME, ".pi/agent/bin/pi-live")
-FLEET = os.path.join(HOME, ".pi/agent/bin/fleet")
-SESSIONS_DIR = os.path.join(HOME, ".pi/agent/sessions")
+# The four sources live under ONE resolved root, not under a home directory each
+# module derives for itself. `fleet_paths` is that root: PI_AGENT_HOME moves the
+# lot, and the CLI's own directory is where the CLIs are, wherever that is.
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fleet_paths import agent_home, bin_dir  # noqa: E402
+
+REGISTRY_DIR = os.path.join(str(agent_home()), "session-names")
+PI_LIVE = os.path.join(str(bin_dir()), "pi-live")
+FLEET = os.path.join(str(bin_dir()), "fleet")
+SESSIONS_DIR = os.path.join(str(agent_home()), "sessions")
 
 _MAX_MESSAGE = 1000
 

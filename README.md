@@ -221,6 +221,33 @@ added by a scan, or `pre-2026-10-26:unattributed` for records opened before that
 no human signature is ever invented for either — and `fleet relabel` now exists as a verb.
 Where this README and that report disagree, this README describes the code that ships.
 
+## The shape to watch: a check that cannot apply
+
+Four times in one night, a check was asked a question it could not answer, and answered as
+though it had. That is more dangerous than a check that fails, because a failure gets read.
+
+| the check | what it was asked | what it answered |
+|---|---|---|
+| per-domain cap | how many workers are in *this* domain, for a row that records no domain | "under the limit" — a worker with no domain in its name was counted in no bucket |
+| brief drift | is this the brief you issued? for a brief that was never hashed | "nothing was issued" |
+| merged | is this branch an ancestor of `origin/main`? asked of the *default* project's repo | "not merged" — while git said `fatal: Not a valid object name` |
+| secret corpus | is this a false positive? over a corpus containing a real assignment | "hit" — correctly: the rule was right and the corpus was wrong. This one is loud on purpose |
+
+The first three are fixed, each with a test that fails when the fix is reverted: the cap counts
+a `domain` field (name prefix only for legacy rows), `fleet_brief.issue()` hashes a hand-written
+brief at spawn and refuses an empty one, and `git_facts` asks the worktree's own repo. The
+fourth is not a bug and is not allowlisted.
+
+The rule that came out of it: **a check that skips must say so, and a check that cannot be
+answered is not a pass.** Where the question genuinely does not apply, the refusal says which
+question it declined to ask and why — `git_provider` returns nothing for a task-kind entry with
+no branch rather than refusing it for a merge that could never happen.
+
+A fifth gap is honest and unfixed: **the memory ceiling is live-only.** The deployment this grew
+up on refuses a spawn that would cross a RAM+swap ceiling unless the human passes `--over-mem`,
+and records the override. That code is not in this package, so a fleet installed from here can
+spawn until the box swaps. It is named here rather than quietly left out.
+
 ## What this is not
 
 - **Not a replacement for subagents.** If the work fits in one context window, use a

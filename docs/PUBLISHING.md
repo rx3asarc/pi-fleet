@@ -147,19 +147,21 @@ required for a scoped package to be installable by anyone. Then re-verify with
 ```bash
 # on a clean clone (no bin/fixtures/, no external corpus)
 python3 -m unittest discover -s bin -p 'test_*.py'
-# Ran 805 tests in 17.200s
+# Ran 809 tests in 17.762s
 # FAILED (failures=1, skipped=19)
 
 # with the frozen baseline armed (FLEET_GATE_FIXTURES, or bin/fixtures/)
-# Ran 805 tests in 19.421s
+python3 -m unittest discover -s bin -p 'test_*.py'
+# Ran 809 tests in 16.906s
 # FAILED (failures=1)
 ```
 
-Denominator, stated once: **801 test methods** is the count on the tree the scrub branch
-started from, everything included. The current tree shows **805** because the brief-issue fix
-added four. Subtests are not a denominator (309 subtest passes ride inside those methods), and
-an earlier figure of 829 in the ship-readiness audit could not be reproduced from any tree on
-this box — it is withdrawn rather than explained.
+**The count, once, with the commit it belongs to: 809 test methods at `51c1142`**
+(805 before `51c1142`, 801 before the brief-issue fix, which added four and four again).
+Subtests are not a denominator — 309 subtest passes ride inside those methods — and an earlier
+figure of 829 in the ship-readiness audit could not be reproduced from any tree on this box, so
+it is withdrawn rather than explained. If you read a different number elsewhere, that number
+belongs to a different commit; this line is the one to compare against.
 
 One red is expected and is not a defect in this tree: `test_fleet_scrub.py` asserts zero false
 positives over a corpus *outside* the repo (operator handoff notes). On a machine without that

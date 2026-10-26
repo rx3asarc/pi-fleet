@@ -63,8 +63,8 @@ def owner_out(pid, tmux):
 
 
 def child(**kw):
-    c = fleet_lineage.new_child(SID, "engrane-citations", PARENT_SID,
-                               "engrane-main", "audit the citations appendix",
+    c = fleet_lineage.new_child(SID, "globex-citations", PARENT_SID,
+                               "globex-main", "audit the citations appendix",
                                NOW, transcript=None)
     c.update(kw)
     return c
@@ -263,7 +263,7 @@ class TestSafeClose(unittest.TestCase):
                          [["tmux", "kill-pane", "-t", "%s:0.1" % self.TMUX]])
 
     def test_measured_2026_10_17_bug_pi_tmux_close_is_never_used_multi_pane(self):
-        # dune:0.1 / nordisk-ads:0.1 — pi-tmux --close here resolved to the
+        # dune:0.1 / acme-ads:0.1 — pi-tmux --close here resolved to the
         # PARENT pane. This is the regression assertion for the whole module.
         self.close()
         self.assertEqual(self.world.argv_matching("pi-tmux", "--close"), [])
@@ -383,9 +383,9 @@ class TestWriteDigest(TempStores):
         self.assertTrue(Path(path).exists())
         self.assertEqual(Path(path).parent, self.digests)
         iso = time.strftime("%Y-%m-%d", time.gmtime(NOW))
-        self.assertEqual(Path(path).name, f"{iso}-engrane-citations-01a1dead.md")
+        self.assertEqual(Path(path).name, f"{iso}-globex-citations-01a1dead.md")
         md = Path(path).read_text()
-        self.assertIn("engrane-citations", md)
+        self.assertIn("globex-citations", md)
         self.assertIn(SID, md)
         self.assertIn("audit the citations appendix", md)
 
@@ -416,7 +416,7 @@ class TestWriteDigest(TempStores):
         self.assertTrue(Path(path).exists())
 
     def test_name_slashes_cannot_escape_the_digest_dir(self):
-        c = child(name="engrane/design")
+        c = child(name="globex/design")
         path = fleet_children._write_digest(c, facts(), {}, NOW)
         self.assertEqual(Path(path).parent, self.digests)
         self.assertNotIn("/", Path(path).name)
@@ -617,7 +617,7 @@ class TestCascade(TempStores):
         self.assertTrue(why)
         self.assertGreaterEqual(ts, NOW)                         # recorded
         self.assertEqual(len(self.world.argv_matching("pi-msg", "send")), 1)
-        self.assertIn("told engrane-main", out1.getvalue())
+        self.assertIn("told globex-main", out1.getvalue())
 
         # Pin the marker older than any clock this test can reach: a same-second
         # rewrite would be indistinguishable from a no-op, an old value is not.
@@ -629,7 +629,7 @@ class TestCascade(TempStores):
         self.assertEqual(again["last_notified"], why)
         self.assertEqual(again["last_notified_at"], NOW - 500)   # untouched
         self.assertEqual(len(self.world.argv_matching("pi-msg", "send")), 1)
-        self.assertNotIn("told engrane-main", out2.getvalue())
+        self.assertNotIn("told globex-main", out2.getvalue())
         self.assertNotIn("would tell", out2.getvalue())
         # Still surfaced, but now as a running grace rather than a repeat
         # announcement: same situation, no second message.
@@ -641,11 +641,11 @@ class TestCascade(TempStores):
         stale = "process gone and never reported — nothing to harvest"
         self._save(child(last_notified=stale, last_notified_at=NOW - 500))
         self.world.live_entries = [
-            {"sessionId": SID, "name": "engrane-citations", "alive": True, "pid": 4242,
+            {"sessionId": SID, "name": "globex-citations", "alive": True, "pid": 4242,
              "reported": False, "session": "dune-fork-1", "pi_status": "",
              "phase": ""},
-            {"sessionId": PARENT_SID, "name": "engrane-main", "alive": True, "pid": 4242,
-             "reported": False, "session": "engrane-main", "pi_status": "",
+            {"sessionId": PARENT_SID, "name": "globex-main", "alive": True, "pid": 4242,
+             "reported": False, "session": "globex-main", "pi_status": "",
              "phase": ""},
         ]
         self.world.records = [{"sessionId": SID,
@@ -657,7 +657,7 @@ class TestCascade(TempStores):
         self.assertIn("idle", saved["last_notified"])
         self.assertGreaterEqual(saved["last_notified_at"], NOW)
         self.assertEqual(len(self.world.argv_matching("pi-msg", "send")), 1)
-        self.assertIn("told engrane-main", out.getvalue())
+        self.assertIn("told globex-main", out.getvalue())
 
     # -- order -------------------------------------------------------------
     def test_reap_order_is_digest_then_ledger_then_close(self):

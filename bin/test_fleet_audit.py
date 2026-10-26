@@ -21,7 +21,7 @@ import fleet_audit as A
 
 SID = "01a1beef-beef-7000-9000-000000000001"
 PARENT = "01a1beef-beef-7000-9000-0000000000ff"
-NAME = "engrane-citations"
+NAME = "globex-citations"
 
 
 def record(**kw):
@@ -40,7 +40,7 @@ def record(**kw):
         "why": "process gone, and it reported its unit",
         "digest": None,                      # filled by the fixture
         "parent_session_id": PARENT,
-        "parent_name": "engrane-main",
+        "parent_name": "globex-main",
         "protected": None,
         "role": None,
         "enrolled_source": "pi-tmux",
@@ -72,8 +72,8 @@ class Fixture:
             f"# {NAME}-{SID[:8]} — reaped 2026-10-17T15:00:00Z (session {SID})\n"
             f"- unit: audit the citations appendix\n\n## What it said it did\n\n"
             f"Audited 41 citations.\n")
-        keep = record(parent_session_id=PARENT, parent_name="engrane-main")
-        keeper = record(**{"sessionId": PARENT, "name": "engrane-main",
+        keep = record(parent_session_id=PARENT, parent_name="globex-main")
+        keeper = record(**{"sessionId": PARENT, "name": "globex-main",
                            "parent_session_id": None, "parent_name": None,
                            "reported_at": None, "report": None, "reaped_at": None,
                            "verdict": None, "protected": True, "digest": None,

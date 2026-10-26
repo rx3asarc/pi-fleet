@@ -205,7 +205,7 @@ class TestD1MissingPidIsUnknown(StoreBase):
                    pid=None, pid_start=None)
         self.lineage_path.write_text(json.dumps(
             {"version": 1, "children": {SID: rec}}, indent=2) + "\n")
-        self.world.live_entries = [{"sessionId": SID, "name": "engrane-citations",
+        self.world.live_entries = [{"sessionId": SID, "name": "globex-citations",
                                    "alive": True, "pid": 4242, "reported": True,
                                    "session": "dune-fork-1", "pi_status": "",
                                    "phase": "", "pending_ask": None}]
@@ -266,7 +266,7 @@ class TestDigestNamesTheSession(StoreBase):
     """
 
     def digest(self, **kw):
-        rec = fleet_lineage.new_child(SID, "engrane-citations", None, None,
+        rec = fleet_lineage.new_child(SID, "globex-citations", None, None,
                                       "audit appendix", 1792242000, **kw)
         return fleet_lineage.digest_md(rec, {"alive": False}, 1792242000,
                                        "2026-10-17T13:00:00Z")

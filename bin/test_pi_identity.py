@@ -5,7 +5,7 @@ PURE. Fixtures only. No filesystem, no tmux, no git.
 WHAT REPAIR ACTUALLY IS (measured 2026-10-11, not assumed)
 The registry already stores the pi name, not the drifted tmux name:
 `session-names/01a116b1-...json` holds `name: "plover-wren"` while tmux still calls
-that session `engrane-rowan`. So the 5 known-drifted sessions need NO registry
+that session `globex-rowan`. So the 5 known-drifted sessions need NO registry
 repair at all -- the drift lives between tmux and pi, and U3 already REPORTS it.
 
 What is genuinely repairable is a record whose stored name is empty or wrong:
@@ -27,10 +27,10 @@ from pi_identity import canonical_name, plan_repair, offenders, WRITER
 # (tmux name, pid, pi name, sessionId) — the 5 live drift cases from U2.
 DRIFTED = [
     ("jasper-alder", 2865745, "amber", "01a11ade-2f99-7230-9c83-e649c4009090"),
-    ("engrane-rowan", 431941, "plover-wren", "01a116b1-3f3a-76dd-b584-7accd993086f"),
+    ("globex-rowan", 431941, "plover-wren", "01a116b1-3f3a-76dd-b584-7accd993086f"),
     ("cobalt-rowan", 2439092, "cobalt", "01a11a38-1111-2222-3333-444455556666"),
-    ("larch", 2522560, "nordisk-goal-helper-6", "01a11a63-1111-2222-3333-444455556666"),
-    ("nimbus", 2573667, "nordisk-goal-helper-7", "01a11a75-1111-2222-3333-444455556666"),
+    ("larch", 2522560, "acme-goal-helper-6", "01a11a63-1111-2222-3333-444455556666"),
+    ("nimbus", 2573667, "acme-goal-helper-7", "01a11a75-1111-2222-3333-444455556666"),
 ]
 
 

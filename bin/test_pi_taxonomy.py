@@ -4,28 +4,55 @@
 PURE. Fixtures only. No tmux, no git, no /proc, no filesystem.
 If any test in this file needs the outside world, the seam is in the wrong place.
 """
+import os
 import unittest
 
 from pi_taxonomy import resolve
 
+# THE FIXTURES HERE CARRY NEUTRAL PROJECT NAMES (acme / globex / initech), not the
+# five values this box happens to run on. `pi_taxonomy` decides whether the first
+# token of a name is a domain by asking `known_domains()`, and that is a SEAM: it
+# reads `FLEET_DOMAINS` at call time. So the neutral fixtures resolve as domains
+# through the documented override, and the shipped default `KNOWN_DOMAINS` is not
+# widened to make them work. What is under test is unchanged — a `<domain>-<topic>`
+# name resolving to its domain — only the spelling of the domain is.
+FIXTURE_DOMAINS = "acme,globex,initech,meta,infra"
+
+_PREVIOUS_DOMAINS = None
+
+
+def setUpModule():
+    global _PREVIOUS_DOMAINS
+    _PREVIOUS_DOMAINS = os.environ.get("FLEET_DOMAINS")
+    os.environ["FLEET_DOMAINS"] = FIXTURE_DOMAINS
+
+
+def tearDownModule():
+    # Restored, not set-and-forgotten: another module in the same process must not
+    # inherit a fixture's fake default.
+    if _PREVIOUS_DOMAINS is None:
+        os.environ.pop("FLEET_DOMAINS", None)
+    else:
+        os.environ["FLEET_DOMAINS"] = _PREVIOUS_DOMAINS
+
 
 class TestDeclaredWins(unittest.TestCase):
     def test_declared_taxonomy_string_is_authoritative(self):
-        r = resolve({"name": "gale", "cwd": "/root"}, declared="nordisk-theme-dup-create")
-        self.assertEqual(r["domain"], "nordisk")
+        r = resolve({"name": "gale", "cwd": "/root"}, declared="acme-theme-dup-create")
+        self.assertEqual(r["domain"], "acme")
         self.assertEqual(r["topic"], "theme")
         self.assertEqual(r["subtopic"], "dup-create")
         self.assertEqual(r["source"], "declared")
         self.assertFalse(r["inferred"])
 
     def test_declared_beats_worktree(self):
-        r = resolve({"name": "x", "worktree": "/mnt/projects/engrane-citations"},
-                    declared="nordisk-theme")
-        self.assertEqual(r["domain"], "nordisk")
+        r = resolve({"name": "x", "worktree": "/mnt/projects/globex-citations"},
+                    declared="acme-theme")
+        self.assertEqual(r["domain"], "acme")
 
     def test_declared_domain_only(self):
-        r = resolve({"name": "gale"}, declared="engrane")
-        self.assertEqual(r["domain"], "engrane")
+        r = resolve({"name": "gale"}, declared="globex")
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "")
         self.assertEqual(r["source"], "declared")
 
@@ -34,24 +61,24 @@ class TestConformingName(unittest.TestCase):
     """A --name that already encodes the taxonomy counts as declared (priority 1)."""
 
     def test_goal_helper_name(self):
-        r = resolve({"name": "nordisk-goal-helper-2", "cwd": "/root"})
-        self.assertEqual(r["domain"], "nordisk")
+        r = resolve({"name": "acme-goal-helper-2", "cwd": "/root"})
+        self.assertEqual(r["domain"], "acme")
         self.assertEqual(r["topic"], "goal")
         self.assertEqual(r["subtopic"], "swarm.helper")
         self.assertEqual(r["source"], "declared")
 
     def test_goal_lead_name(self):
-        r = resolve({"name": "nordisk-goal-lead-10", "cwd": "/root"})
+        r = resolve({"name": "acme-goal-lead-10", "cwd": "/root"})
         self.assertEqual((r["domain"], r["topic"], r["subtopic"]),
-                         ("nordisk", "goal", "swarm.lead"))
+                         ("acme", "goal", "swarm.lead"))
 
     def test_storefront(self):
-        r = resolve({"name": "nordisk-main", "cwd": "/root"})
-        self.assertEqual((r["domain"], r["topic"]), ("nordisk", "storefront"))
+        r = resolve({"name": "acme-main", "cwd": "/root"})
+        self.assertEqual((r["domain"], r["topic"]), ("acme", "storefront"))
 
-    def test_engrane_worker(self):
-        r = resolve({"name": "engrane-operations", "cwd": "/root"})
-        self.assertEqual(r["domain"], "engrane")
+    def test_globex_worker(self):
+        r = resolve({"name": "globex-operations", "cwd": "/root"})
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "operations")
 
 
@@ -60,15 +87,15 @@ class TestWorktree(unittest.TestCase):
 
     def test_citations_worktree(self):
         r = resolve({"name": "basalt",
-                     "worktree": "/mnt/HC_Volume_105587324/projects/engrane-citations"})
-        self.assertEqual(r["domain"], "engrane")
+                     "worktree": "/mnt/fleet-volume/projects/globex-citations"})
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "citations")
         self.assertEqual(r["source"], "worktree")
 
     def test_worktree_ahead_of_cwd(self):
         r = resolve({"name": "basalt", "cwd": "/root",
-                     "worktree": "/mnt/HC_Volume_105587324/projects/engrane-try-section"})
-        self.assertEqual(r["domain"], "engrane")
+                     "worktree": "/mnt/fleet-volume/projects/globex-try-section"})
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "try-section")
 
 
@@ -79,9 +106,9 @@ class TestCwd(unittest.TestCase):
         r = resolve({"name": "marrow", "cwd": "/root"})
         self.assertEqual(r["domain"], "unscoped")
 
-    def test_nordisk_cwd(self):
-        r = resolve({"name": "marrow", "cwd": "/mnt/HC_Volume_105587324/nordisk"})
-        self.assertEqual(r["domain"], "nordisk")
+    def test_acme_cwd(self):
+        r = resolve({"name": "marrow", "cwd": "/mnt/fleet-volume/acme"})
+        self.assertEqual(r["domain"], "acme")
         self.assertEqual(r["source"], "cwd")
 
     def test_generic_dirs_all_ignored(self):
@@ -96,14 +123,14 @@ class TestInferred(unittest.TestCase):
 
     def test_keyword_hit_is_inferred(self):
         r = resolve({"name": "marrow", "cwd": "/root",
-                     "first_user_message": "fix the nordisk theme duplicate"})
-        self.assertEqual(r["domain"], "nordisk")
+                     "first_user_message": "fix the acme theme duplicate"})
+        self.assertEqual(r["domain"], "acme")
         self.assertEqual(r["source"], "inferred")
         self.assertTrue(r["inferred"])
 
     def test_inferred_is_weaker_than_cwd(self):
         # a real cwd beats a keyword guess: same message, but cwd is meaningful
-        r = resolve({"name": "marrow", "cwd": "/mnt/HC_Volume_105587324/nordisk",
+        r = resolve({"name": "marrow", "cwd": "/mnt/fleet-volume/acme",
                      "first_user_message": "totally unrelated words"})
         self.assertEqual(r["source"], "cwd")
         self.assertFalse(r["inferred"])
@@ -135,9 +162,9 @@ class TestShape(unittest.TestCase):
     def test_shape_is_stable(self):
         cases = [
             ({"name": "marrow", "cwd": "/root"}, None),
-            ({"name": "gale"}, "nordisk-theme"),
-            ({"name": "x", "worktree": "/p/engrane-citations"}, None),
-            ({"name": "nordisk-goal-helper-2"}, None),
+            ({"name": "gale"}, "acme-theme"),
+            ({"name": "x", "worktree": "/p/globex-citations"}, None),
+            ({"name": "acme-goal-helper-2"}, None),
             ({}, None),
         ]
         for entry, declared in cases:
@@ -153,7 +180,7 @@ class TestShape(unittest.TestCase):
     def test_is_pure_does_not_mutate_input(self):
         entry = {"name": "marrow", "cwd": "/root"}
         snapshot = dict(entry)
-        resolve(entry, declared="nordisk-theme")
+        resolve(entry, declared="acme-theme")
         self.assertEqual(entry, snapshot)
 
 
@@ -180,11 +207,11 @@ class TestCollisionCases(unittest.TestCase):
                 self.assertEqual(r["source"], "none")
 
     def test_a_real_domain_prefix_still_parses(self):
-        """`engrane-rowan` looks like a collision but is NOT one: its first token
-        is a known domain, so engrane/rowan is the honest reading. What separates
+        """`globex-rowan` looks like a collision but is NOT one: its first token
+        is a known domain, so globex/rowan is the honest reading. What separates
         the two cases is membership in KNOWN_DOMAINS, not the hyphen."""
-        r = resolve({"name": "engrane-rowan", "cwd": "/root"})
-        self.assertEqual(r["domain"], "engrane")
+        r = resolve({"name": "globex-rowan", "cwd": "/root"})
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "rowan")
         self.assertEqual(r["source"], "declared")
         self.assertFalse(r["inferred"])
@@ -192,8 +219,8 @@ class TestCollisionCases(unittest.TestCase):
     def test_collision_name_still_yields_to_a_real_worktree(self):
         """A junk name must not mask a real signal from where the session sits."""
         r = resolve({"name": "falcon-moss",
-                     "cwd": "/mnt/HC_Volume_105587324/projects/engrane-citations"})
-        self.assertEqual(r["domain"], "engrane")
+                     "cwd": "/mnt/fleet-volume/projects/globex-citations"})
+        self.assertEqual(r["domain"], "globex")
         self.assertEqual(r["topic"], "citations")
         self.assertEqual(r["source"], "cwd")
 
@@ -215,8 +242,8 @@ class TestSpawnTimeDeclaration(unittest.TestCase):
 
     def test_a_conforming_name_yields_a_declaration(self):
         from pi_taxonomy import declaration_of_name
-        self.assertEqual(declaration_of_name("nordisk-ads-pixel"), "nordisk/ads/pixel")
-        self.assertEqual(declaration_of_name("engrane-citations"), "engrane/citations")
+        self.assertEqual(declaration_of_name("acme-ads-pixel"), "acme/ads/pixel")
+        self.assertEqual(declaration_of_name("globex-citations"), "globex/citations")
 
     def test_a_name_with_no_domain_declares_nothing(self):
         from pi_taxonomy import declaration_of_name
@@ -225,8 +252,8 @@ class TestSpawnTimeDeclaration(unittest.TestCase):
 
     def test_a_valid_declaration_round_trips(self):
         from pi_taxonomy import parse_declaration
-        self.assertEqual(parse_declaration("nordisk/ads/pixel"), "nordisk/ads/pixel")
-        self.assertEqual(parse_declaration("  Nordisk/Ads  "), "nordisk/ads")
+        self.assertEqual(parse_declaration("acme/ads/pixel"), "acme/ads/pixel")
+        self.assertEqual(parse_declaration("  Acme/Ads  "), "acme/ads")
 
     def test_a_malformed_declaration_is_dropped_not_coerced(self):
         from pi_taxonomy import parse_declaration
@@ -235,9 +262,9 @@ class TestSpawnTimeDeclaration(unittest.TestCase):
 
     def test_a_declaration_outranks_every_derived_guess(self):
         from pi_taxonomy import resolve
-        got = resolve({"name": "engrane-citations", "cwd": "/root/nordisk"},
-                      declared="nordisk/water/copy")
+        got = resolve({"name": "globex-citations", "cwd": "/root/acme"},
+                      declared="acme/water/copy")
         self.assertEqual((got["domain"], got["topic"], got["subtopic"]),
-                         ("nordisk", "water", "copy"))
+                         ("acme", "water", "copy"))
         self.assertEqual(got["source"], "declared")
         self.assertFalse(got["inferred"])

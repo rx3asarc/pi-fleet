@@ -5,15 +5,24 @@
 # silences a credential. Run `python3 tests/readiness.py --repo .` to see what
 # this file suppresses, and why.
 #
-# Deliberately short: 3 lines covering 26 files. Everything else the gate named
+# Deliberately short: 4 lines covering 4 files. Everything else the gate named
 # was fixed rather than allowed (66 findings on the first run after the merges,
 # 0 with this file in place).
+#
+# The blanket line for `bin/test_*.py` is gone: it covered 24 test modules on the
+# argument that their fixtures were the real session names the assertions were
+# built on. The assertions were about MECHANISMS (a legacy `<domain>-<subject>`
+# name resolving to a domain, tmux-vs-pi drift, a pinned snapshot of 7 rows), and
+# a neutral name of identical shape exercises the identical mechanism, so the
+# fixtures were scrubbed instead and the modules are scanned like every other
+# file. The one remaining test-file literal (a volume path the test asserts is
+# ABSENT from shipped code) is assembled from fragments, as this gate's own
+# vocabulary list is.
 
 internal-vocab bin/pi_taxonomy.py KNOWN_DOMAINS is the seam's documented default example set (five domain names from the box this grew up on). It is a DEFAULT, read at call time and overridable via FLEET_DOMAINS; deleting the names would delete the evidence the override test is built on, which is why the change here was a seam rather than a deletion.
 
 internal-vocab bin/fleet_pid_assert.py NAME_STRIP_PREFIXES is box-local name-repair data: a worktree directory is `<repo>-<session name>`, and these are this box's repo names. It is a named constant and not a "strip the first path segment" rule on purpose — a blanket strip over-matches and can witness the wrong live session. Widening it to a generic default is a behaviour change U8 is not authorised to make silently, so it is reported upward instead of guessed at.
 
-internal-vocab bin/test_*.py 24 test modules use this box's real session names as fixture data for the lineage, door, domain-cap, index and identity tests. The assertions are ABOUT those names (legacy `domain-` prefixes resolving to a domain, drift between a tmux name and a pi name, a pinned baseline of 7 rows); renaming them would delete the evidence the tests are built on rather than sanitise it. Covers: test_fleet_ack, audit, bundle, children, dismiss_semantics, domain_cap, door, entries, gate, identity, integrity, lineage, p0, policy, reconcile, restore, resume_dark, scrub, sweep_lineage, test_name_contract, test_pi_identity, test_pi_index, test_pi_taxonomy, test_pi_view.
 
 internal-vocab docs/SCAFFOLD-NOTES.md This file IS the measurement report of what was copied out of this box: its whole content is tables of per-file counts of this box's own private vocabulary. Sanitising it would destroy the record the U2 unit was asked to produce. It is deliberately excluded from the published tarball (`package.json` files: `!docs/SCAFFOLD-NOTES.md`), so it never reaches an npm consumer.
 

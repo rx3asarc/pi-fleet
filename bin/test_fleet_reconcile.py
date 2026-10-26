@@ -86,9 +86,9 @@ class TestReconcile(unittest.TestCase):
 
     def test_an_ended_record_never_yields_a_live_row(self):
         """The record says ended; a live pid with the same NAME must not revive it."""
-        self.pi = FakePi(live=[{"sessionId": "live1", "name": "nordisk-ads", "pid": 100}])
+        self.pi = FakePi(live=[{"sessionId": "live1", "name": "acme-ads", "pid": 100}])
         self.truth = gt.truth_from(self.pi, alive=alive)
-        store = {"old-sid": {"sessionId": "old-sid", "name": "nordisk-ads",
+        store = {"old-sid": {"sessionId": "old-sid", "name": "acme-ads",
                              "pid": 200, "phase": "ended"}}
         rep = gt.reconcile(store, self.truth, alive=alive)
         self.assertNotIn("old-sid", rep["live"])

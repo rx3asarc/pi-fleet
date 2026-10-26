@@ -173,10 +173,19 @@ class TestTheExampleDomainSetIsOverridable(unittest.TestCase):
         # THE FIVE ARE PINNED ON PURPOSE. `check`/the unit says: make the set
         # configurable, do not delete the values this box runs on. A configurable
         # default with nothing pinning it is a default any refactor can erase.
+        #
+        # The VALUES are this box's private project names, so they are recorded once,
+        # in `pi_taxonomy.py` (and in that file's .readiness-allow line), rather than
+        # repeated in a public test file. What is pinned here is what keeping them
+        # BUYS: the default set is exactly five values, it is what `known_domains()`
+        # returns when nothing overrides it, and every value still resolves a legacy
+        # `<domain>-...` name to its domain -- which is the behaviour that deleting a
+        # value would silently break, and the only reason the values are kept.
         with mock.patch.dict(os.environ, {"FLEET_DOMAINS": ""}, clear=False):
             self.assertEqual(pi_taxonomy.known_domains(), pi_taxonomy.KNOWN_DOMAINS)
-        for d in ("nordisk", "engrane", "enc1", "meta", "infra"):
-            self.assertIn(d, pi_taxonomy.KNOWN_DOMAINS)
+        self.assertEqual(len(pi_taxonomy.KNOWN_DOMAINS), 5)
+        for d in pi_taxonomy.KNOWN_DOMAINS:
+            self.assertEqual(pi_taxonomy.declared_domain(f"{d}-copy-1"), d)
         src = pathlib.Path(pi_taxonomy.__file__).read_text()
         self.assertIn("FLEET_DOMAINS", src)
         self.assertIn("sk-", src, "the domain-vs-`sk-` scanner false positive is recorded")

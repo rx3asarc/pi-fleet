@@ -24,12 +24,12 @@ PARENT = "01a1b0de-dead-7000-9000-0000000000ff"
 
 def record(**kw):
     rec = {
-        "sessionId": SID, "name": "engrane-citations", "unit": "audit citations",
+        "sessionId": SID, "name": "globex-citations", "unit": "audit citations",
         "done_criteria": "41 citations", "transcript": None,
         "spawned_at": 1792246000, "reported_at": 1792246100,
         "report": "audited 41 citations", "keep_until": None,
         "reaped_at": 1792246200, "verdict": "reap", "why": "reported its unit",
-        "digest": None, "parent_session_id": PARENT, "parent_name": "engrane-main",
+        "digest": None, "parent_session_id": PARENT, "parent_name": "globex-main",
         "protected": None, "role": None,
         # the evidence layer: exactly what a restore cannot recover
         "checks": {"status": "verified",
@@ -54,7 +54,7 @@ class World:
         self.ledger.write_text("")
 
     def digest(self, sid, body="# receipt\n\nran 41 checks\n"):
-        p = self.digests / f"2026-10-17-engrane-{sid[:8]}.md"
+        p = self.digests / f"2026-10-17-globex-{sid[:8]}.md"
         p.write_text(body)
         return p
 
@@ -64,8 +64,8 @@ class World:
                                            indent=2) + "\n")
         self.rows = rows if rows is not None else [
             {"ts": 1792246200, "action": "reap", "sessionId": SID,
-             "name": "engrane-citations", "parent": PARENT,
-             "digest": str(self.digests / f"2026-10-17-engrane-{SID[:8]}.md")}]
+             "name": "globex-citations", "parent": PARENT,
+             "digest": str(self.digests / f"2026-10-17-globex-{SID[:8]}.md")}]
         self.ledger.write_text("".join(json.dumps(r) + "\n" for r in self.rows))
 
     def export(self):
@@ -95,7 +95,7 @@ class Base(unittest.TestCase):
         self.w = World(td.name)
         self.digest = self.w.digest(SID)
         self.w.seed({SID: record(digest=str(self.digest)),
-                     PARENT: record(**{"sessionId": PARENT, "name": "engrane-main",
+                     PARENT: record(**{"sessionId": PARENT, "name": "globex-main",
                                        "parent_session_id": None, "digest": None,
                                        "checks": None, "claims": None})})
 
@@ -145,7 +145,7 @@ class TestRoundTrip(Base):
             json.loads(line)                       # every line is JSON on its own
 
     def test_export_refuses_when_a_receipt_body_is_missing(self):
-        (self.w.digests / f"2026-10-17-engrane-{SID[:8]}.md").unlink()
+        (self.w.digests / f"2026-10-17-globex-{SID[:8]}.md").unlink()
         with self.assertRaises(ValueError) as ctx:
             B.build_bundle(self.w.lineage, self.w.ledger, self.w.digests)
         self.assertIn("without its receipts", str(ctx.exception))

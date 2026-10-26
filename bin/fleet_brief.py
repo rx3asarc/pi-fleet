@@ -145,6 +145,29 @@ def write(path, text):
     return str(p)
 
 
+def issue(path):
+    """The sha of a hand-written brief, read at spawn time.
+
+    WHY THIS EXISTS (MEASURED 2026-10-26). A brief that `--plan` RENDERS was hashed
+    at issue; a brief handed to `--brief` was not hashed at all, so `brief_sha` was
+    "" on every such row and `drift()` therefore answered "nothing was issued" for
+    the commonest way a worker is briefed. The drift check was not wrong, it was
+    never armed: three units ran from a plan instead of a brief, and a later edit to
+    any hand-written brief would have been undetectable under a running worker.
+
+    Raises ValueError for a missing or empty brief -- an empty contract is not a
+    contract, and a spawn that proceeds with one records a worker nobody briefed.
+    """
+    from pathlib import Path
+    p = Path(str(path))
+    if not p.is_file():
+        raise ValueError(f"brief not found: {p}")
+    text = p.read_text()
+    if not text.strip():
+        raise ValueError(f"brief is empty: {p}")
+    return sha(text)
+
+
 def drift(brief_path, expected_sha):
     """None when the brief on disk is the issued one; otherwise a reason string."""
     from pathlib import Path

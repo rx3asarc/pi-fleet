@@ -148,7 +148,10 @@ The `fleet` CLI shells out to sibling CLIs that ship in the same `bin/`
 worker sessions, or the shell-outs will resolve to whatever else is installed.
 
 Runtime dependencies: **python3** (standard library only — no pip installs),
-**tmux**, **git**, and **pi** itself.
+**tmux**, **git**, **pi** itself, and the **pi-intercom broker** — `pi install
+npm:pi-intercom`. The broker is not optional: `fleet send`, `fleet ask`, every `fleet
+done` report, the rollup and the wake pokes go through it. It is declared in
+`package.json`, and `bin/pi-msg` says so in one line if it is missing.
 
 ## State
 

@@ -5,44 +5,127 @@
 #   pi-msg send --to <name|id> --text "msg"      # fire-and-forget
 #   pi-msg ask  --to <name|id> --text "q?" [--timeout-ms N]   # blocks for a reply
 #   pi-msg list --json
+#   pi-msg unregistered [--match REGEX] [--wake] # tmux-alive sessions the broker cannot see
 #
 #   --wake     wake an idle/unregistered target (tmux Escape -> text -> Enter) first
 #   --force    send even when the target is not registered (accept the dead letter)
 #
-# Exit codes: 0 ok | 1 usage/connection/delivery failure | 2 ask timeout | 3 target not connected
+# Exit codes: 0 ok | 1 usage/connection/delivery failure/broker missing | 2 ask timeout
+#            | 3 target not connected
+#
+# ── THE BROKER IS A DEPENDENCY, SO IT IS RESOLVED, NOT ASSUMED ───────────────
+# The broker (npm:pi-intercom) used to be resolved as one literal path under the agent
+# home, and a stranger's install exited 1 pointing at a file that was never there. It is
+# now a ladder, cheapest rung first, and the last rung is a sentence a human can act on:
+#
+#   1. `pi-intercom` on PATH                       — an explicit install wins
+#   2. $PI_AGENT_HOME/npm/node_modules/pi-intercom  — the agent's own tree; cli.mjs is the
+#      npm bin, cli.ts is the TypeScript sibling a released install may not ship
+#   3. this package's own node_modules              — pi installs declared dependencies
+#   4. `npx --no-install pi-intercom`               — nothing downloaded, nothing guessed
+#
+# Every rung fails => one line naming the fix (`pi install npm:pi-intercom`), never a
+# dangling absolute path that tells a user nothing about what to do.
 #
 # ── WHY THE REGISTRATION PRE-FLIGHT EXISTS (MEASURED 2026-10-13) ─────────────
-# A long-idle session DROPS its broker registration. The underlying CLI then
-# still prints success and exits 0 for `send`, so nine dispatches from
-# nordisk-goal-lead-10 were DEAD LETTERS THAT LOOKED DELIVERED; `ask` fails
-# honestly ("Target session is not currently connected") but `send` does not.
-# A lead that trusts exit 0 will sit "coordinating" an empty fleet. So: verify
-# the target is registered, and if it is not, say so and exit non-zero. Use
-# --wake to wake it (its registration returns once it runs a turn), or --force
-# to deliberately accept a dead letter.
+# A long-idle session DROPS its broker registration. The underlying CLI then still prints
+# success and exits 0 for `send`, so dispatches were DEAD LETTERS THAT LOOKED DELIVERED;
+# `ask` fails honestly ("Target session is not currently connected") but `send` does not.
+# A lead that trusts exit 0 will sit "coordinating" an empty fleet. So: verify the target
+# is registered, and if it is not, say so and exit non-zero. Use --wake to wake it (its
+# registration returns once it runs a turn), or --force to deliberately accept a dead letter.
 set -uo pipefail
-# The agent home is pi's, and `fleet_paths.agent_home()` owns that decision in
-# python. A shell script cannot import it, so it spells the same rule: PI_AGENT_HOME
-# wins, else $HOME/.pi/agent. (test_fleet_paths.py asserts the two agree.)
+
+# The agent home is pi's, and `fleet_paths.agent_home()` owns that decision in python. A
+# shell script cannot import it, so it spells the same rule: PI_AGENT_HOME wins, else
+# $HOME/.pi/agent. (test_fleet_paths.py asserts the two agree.)
 AGENT_HOME="${PI_AGENT_HOME:-${HOME}/.pi/agent}"
-CLI="${AGENT_HOME}/npm/node_modules/pi-intercom/cli.ts"
-TSX="${AGENT_HOME}/npm/node_modules/tsx/dist/cli.mjs"
-[ -f "$CLI" ] || { echo "pi-intercom not installed at $CLI" >&2; exit 1; }
+INSTALL_HINT="pi install npm:pi-intercom"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+NODE="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE" ] && [ -x /usr/bin/node ]; then NODE=/usr/bin/node; fi
+
+BROKER_LAUNCH=()
+
+# us: <argv...> run the broker with the arguments given
+broker() { "${BROKER_LAUNCH[@]}" "$@"; }
+
+broker_resolve() {
+  local p dir tsx cand
+  # rung 1 — an explicit install on PATH
+  p="$(command -v pi-intercom 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -f "$p" ]; then
+    case "$p" in
+      *.mjs|*.js|*.cjs)
+        if [ -n "$NODE" ]; then BROKER_LAUNCH=("$NODE" "$p"); else BROKER_LAUNCH=("$p"); fi ;;
+      *) BROKER_LAUNCH=("$p") ;;
+    esac
+    return 0
+  fi
+  # rung 2 — the agent's own npm tree
+  dir="${AGENT_HOME}/npm/node_modules/pi-intercom"
+  if [ -n "$NODE" ] && [ -f "$dir/cli.mjs" ]; then
+    BROKER_LAUNCH=("$NODE" "$dir/cli.mjs"); return 0
+  fi
+  tsx="${AGENT_HOME}/npm/node_modules/tsx/dist/cli.mjs"
+  if [ -n "$NODE" ] && [ -f "$dir/cli.ts" ] && [ -f "$tsx" ]; then
+    BROKER_LAUNCH=("$NODE" "$tsx" "$dir/cli.ts"); return 0
+  fi
+  # rung 3 — this package's own installed dependency tree (pi installs declared deps)
+  for cand in "${SELF_DIR}/../node_modules/pi-intercom/cli.mjs" \
+              "${SELF_DIR}/../node_modules/.bin/pi-intercom"; do
+    if [ -f "$cand" ]; then
+      case "$cand" in
+        *.mjs|*.js|*.cjs) if [ -n "$NODE" ]; then BROKER_LAUNCH=("$NODE" "$cand");
+                          else BROKER_LAUNCH=("$cand"); fi ;;
+        *) BROKER_LAUNCH=("$cand") ;;
+      esac
+      return 0
+    fi
+  done
+  # rung 4 — npx, without downloading anything. Probe by asking for its usage text: a
+  # missing package prints npm errors instead, so the probe cannot be fooled by rm -rf.
+  if command -v npx >/dev/null 2>&1; then
+    local probe
+    if command -v timeout >/dev/null 2>&1; then
+      probe="$(timeout 30 npx --no-install pi-intercom --help </dev/null 2>&1 || true)"
+    else
+      probe="$(npx --no-install pi-intercom --help </dev/null 2>&1 || true)"
+    fi
+    case "$probe" in
+      *"usage: pi-intercom"*) BROKER_LAUNCH=(npx --no-install pi-intercom); return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+if ! broker_resolve; then
+  echo "pi-msg: the pi-intercom broker is not installed — run: ${INSTALL_HINT}" >&2
+  exit 1
+fi
 
 # `ls` is a nicety for muscle memory
 if [ "${1:-}" = "ls" ]; then shift; set -- list "$@"; fi
 
-# `pi-msg fleet` — which goal sessions are ALIVE IN TMUX but NOT REGISTERED with
-# the broker (i.e. would be dead-letter targets). Per-session wake is an explicit
-# choice, never a background sweep: Escape ABORTS a working turn, so only a
-# session blocked in a modal is ever safe to unblock automatically.
-if [ "${1:-}" = "fleet" ]; then
+# `pi-msg unregistered` — which tmux sessions are ALIVE but NOT REGISTERED with the broker
+# (i.e. would be dead-letter targets). Per-session wake is an explicit choice, never a
+# background sweep: Escape ABORTS a working turn, so only a session blocked in a modal is
+# ever safe to unblock automatically. `--match REGEX` narrows the tmux list.
+if [ "${1:-}" = "unregistered" ] || [ "${1:-}" = "fleet" ]; then
   shift
-  WANT_WAKE=0; [ "${1:-}" = "--wake" ] && WANT_WAKE=1
-  REG=$(/usr/bin/node "$TSX" "$CLI" list 2>/dev/null | awk '{print $1}' | tr '
-' ' ')
-  echo "tmux-alive goal sessions NOT registered (dead-letter targets):"
-  for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^nordisk-goal'); do
+  WANT_WAKE=0; MATCH=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wake) WANT_WAKE=1; shift ;;
+      --match) MATCH="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  REG=$(broker list 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+  echo "tmux-alive sessions NOT registered (dead-letter targets):"
+  for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+    if [ -n "$MATCH" ]; then echo "$s" | grep -Eq "$MATCH" || continue; fi
     case " $REG " in *" $s "*) continue ;; esac
     echo "  $s"
     if [ "$WANT_WAKE" = "1" ]; then
@@ -60,7 +143,7 @@ fi
 cmd="${1:-}"
 case "$cmd" in
   send|ask) ;;
-  *) exec /usr/bin/node "$TSX" "$CLI" "$@" ;;
+  *) exec "${BROKER_LAUNCH[@]}" "$@" ;;
 esac
 
 TO=""; WAKE=0; FORCE=0; ARGS=()
@@ -74,7 +157,7 @@ while [ $# -gt 0 ]; do
 done
 
 registered() {
-  /usr/bin/node "$TSX" "$CLI" list --json 2>/dev/null | python3 -c '
+  broker list --json 2>/dev/null | python3 -c '
 import json,sys
 t=sys.argv[1]
 try: d=json.load(sys.stdin)
@@ -90,8 +173,8 @@ sys.exit(1)
 }
 
 wake_target() {
-  # Wake by pane: Escape first (a modal swallows typed text — the goal-focus
-  # panel and the ask_user_question selector both do), then a short nudge.
+  # Wake by pane: Escape first (a modal swallows typed text — a focus panel and the
+  # ask_user_question selector both do), then a short nudge.
   local pane
   pane=$(tmux list-panes -a -F '#{pane_id} #{pane_pid}' 2>/dev/null | while read -r id pid; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null)
@@ -130,4 +213,4 @@ if ! registered; then
   # rc=2 (broker unreadable) falls through: never block on a diagnostic failure
 fi
 
-exec /usr/bin/node "$TSX" "$CLI" "${ARGS[@]}"
+exec "${BROKER_LAUNCH[@]}" "${ARGS[@]}"

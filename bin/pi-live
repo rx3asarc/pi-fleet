@@ -1,0 +1,324 @@
+#!/usr/bin/env node
+/**
+ * pi-live — outside view of which pi sessions are actually alive.
+ *
+ * Exists because the intercom roster lies after an internet cut: it reports a
+ * session as "thinking" based on a LOCAL socket that never dropped, while the
+ * provider stream is dead. This reads the durable per-session records written by
+ * the session-liveness extension and classifies each one for real:
+ *
+ *   LIVE     pid alive (same /proc start-time) and progress is recent
+ *   STALLED  pid alive, mid-turn, provider silent — i.e. the connection is cut
+ *   ORPHAN   pid alive but the shell/sshd it ran under is gone: an ssh drop left
+ *            pi running on a pts nobody can reach. Work is unclaimed.
+ *   GONE     process is dead, and it never exited cleanly = work was interrupted
+ *   ENDED    exited cleanly (kept for history, not a problem)
+ *
+ * Usage:
+ *   pi-live                 all sessions, newest first
+ *   pi-live --unfinished    only stalled/gone
+ *   pi-live <name|id>       full detail + deterministic handoff for one session
+ *
+ * WHERE THE LOGIC LIVES
+ *   Not here. This file is the CLI — argument handling, the table, the detail
+ *   page. Every decision (classification, stall thresholds, strand detection,
+ *   the ledger, derived discovery) comes from
+ *   `session-watch/core/session-liveness-core.ts`, which the pi extension
+ *   imports too.
+ *
+ *   Until 2026-10-07 this file carried its own hand-synced copy of that logic
+ *   and imported the extension back for the ledger — a cycle, and a copy that
+ *   had already drifted: a flat 2-minute stall threshold here against a
+ *   phase-aware one there meant a long `bash` run was reported STALLED by this
+ *   table and LIVE by the extension, for the same record. See
+ *   session-watch/NOTES-duplication-drift.md and NOTES-extraction-scope.md.
+ *
+ *   The core is TypeScript, loaded with a dynamic import; node strips the types
+ *   on the fly (v22.18+ does this unflagged). No build step, so the file pi
+ *   loads and the file this reads are the same bytes.
+ */
+"use strict";
+
+const { writeSync } = require("node:fs");
+const { join } = require("node:path");
+
+const HOME = process.env.HOME || "/root";
+// Find the core next to THIS script first, under $HOME second.
+//
+// `$HOME/.pi/agent/...` looked equivalent because on Maestro's box the two are the
+// same tree — but the script ships beside the core, and resolving the code through
+// the data directory meant a caller with a different HOME (a hermetic test, a
+// sandbox, an `sudo -H`) could not load the module at all: "cannot load the
+// liveness core". The data it prints still comes from $HOME; only the code is
+// located relative to the script. Found 2026-10-24 writing pi-live-cli.test.mjs.
+const CORE_PATH =
+  process.env.PI_WATCH_CORE ||
+  join(__dirname, "..", "extensions", "_lib", "session-liveness-core.ts");
+
+// ── the core, bound in boot() before main() runs ────────────────────────────
+//
+// Declared `let` and assigned rather than imported because this is CommonJS and
+// the core is ESM-compatible TypeScript: `require()` cannot load it, and a
+// top-level `await import()` is not available in CJS. Binding before main()
+// keeps every call site below identical to the pre-hoist file.
+let classify;
+let fmtAge;
+let silenceLabel;
+let handoff;
+let allRecords;
+let verifyClaims;
+let ledgerSections;
+let markDismissed;
+let STATE_LABEL;
+let STALE_MS;
+let hasTranscript;
+
+function short(t, n) {
+  return String(t || "").replace(/\s+/g, " ").trim().slice(0, n);
+}
+
+/** The long-form view: `pi-live <name>`. */
+function detail(rec, now) {
+  const state = classify(rec, now);
+  const out = [];
+  if (rec.dismissed) out.push("(dismissed — kept for reference only)");
+  out.push(`session   : ${rec.name}  (${rec.sessionId})`);
+  out.push(
+    `state     : ${STATE_LABEL[state] || state}` +
+      (state === "stalled" ? ` — provider silent ${fmtAge(rec.lastProgressAt, now)}, phase "${rec.phase}" (${rec.detail})` : "") +
+      (state === "orphaned" ? ` — pi is alive but its shell/sshd exited; ${rec.tty} is unreachable` : "") +
+      (state === "stranded"
+        ? ` — pi is alive on ${rec.tty}, but that terminal has received nothing for ${silenceLabel(rec, now)} (half-open connection after an internet cut)`
+        : ""),
+  );
+  out.push(`pid/tty   : ${rec.pid ?? "(no process)"} / ${rec.tty}   host cwd: ${rec.cwd}`);
+  if (rec.derived) {
+    out.push(
+      rec.vanished
+        ? `source    : DERIVED from its transcript alone — no liveness record, and its process is gone`
+        : `source    : DERIVED from the live process + transcript — this session predates the liveness ` +
+            `extension, so it has no record of its own`,
+    );
+  }
+  out.push(
+    `state     : measured?` + (rec.derived ? " NO — inferred from the final turn, not from a live watchdog" : " yes"),
+  );
+  out.push(`last seen : ${new Date(rec.updatedAt).toISOString()} (${fmtAge(rec.updatedAt, now)} ago)`);
+  if (rec.model || rec.provider) out.push(`model     : ${rec.provider}/${rec.model}`);
+  out.push(
+    hasTranscript(rec)
+      ? `transcript: ${rec.transcript}`
+      : rec.transcript
+        ? `transcript: ${rec.transcript}  <- MISSING or empty: there is nothing to resume. ` +
+          `Only its handoff is left (pi-live --handoff ${rec.name}).`
+        : `transcript: (none was ever written — nothing to resume, only a handoff)`,
+  );
+  if (rec.git) out.push(`git       : ${rec.git.branch}${rec.git.dirty ? `, ${rec.git.dirty} modified` : ", clean"}`);
+  out.push("");
+  out.push(`turn count: ${rec.turnCount}`);
+  out.push(`last ask  : ${short(rec.lastPrompt, 400) || "(none)"}`);
+  out.push(`last reply: ${short(rec.lastAssistant, 400) || "(none)"}`);
+  if (rec.todos && rec.todos.length) {
+    out.push("todos     :");
+    for (const t of rec.todos) out.push(`            [${t.status}] ${t.text}`);
+  }
+  if (rec.filesTouched && rec.filesTouched.length) {
+    out.push(`files     : ${rec.filesTouched.slice(-15).join(", ")}`);
+  }
+  if (rec.lastTool) {
+    const ended = rec.lastTool.endedAt ? `finished${rec.lastTool.isError ? " (error)" : ""}` : "NEVER RETURNED";
+    out.push(`last tool : ${rec.lastTool.name} — ${rec.lastTool.preview} [${ended}]`);
+  }
+  if (rec.stall) {
+    out.push("");
+    out.push(
+      `stall     : flagged ${fmtAge(rec.stall.detectedAt, now)} ago, silent ${Math.round(rec.stall.silentMs / 1000)}s while ${rec.stall.phase}`,
+    );
+  }
+  return out.join("\n");
+}
+
+/**
+ * The handoff, plus the ledger.
+ *
+ * The ledger used to be rendered by spawning `node -e "import(extension)"` with
+ * the record on stdin — the other half of the cycle. It is a direct call now, so
+ * there is no ~150 ms subprocess and no fail-open path to get wrong. The
+ * try/catch stays: a handoff with no ledger is still a handoff, and a broken
+ * ledger must never cost you the one thing you asked for.
+ */
+function withLedger(text, rec) {
+  try {
+    verifyClaims(rec);
+    const ledger = ledgerSections(rec);
+    return ledger ? `${text}\n\n${ledger}` : text;
+  } catch {
+    return text;
+  }
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  const onlyUnfinished = args.includes("--unfinished") || args.includes("-u");
+  const wantHandoff = args.includes("--handoff");
+
+  // --dismiss takes a value, so it is parsed before the positional lookup — else
+  // the value would be mistaken for a session name and the flag resolve too late.
+  const dismissIdx = args.indexOf("--dismiss");
+  const dismissTarget = dismissIdx === -1 ? null : args[dismissIdx + 1] || "";
+  const wanted = args.find((a, i) => !a.startsWith("-") && (dismissIdx === -1 || i !== dismissIdx + 1));
+
+  const now = Date.now();
+
+  const all = allRecords(now).sort((a, b) => b.updatedAt - a.updatedAt);
+  // Everything pending, still addressable. Only the display paths drop dismissed rows.
+  const pending = all.filter((r) => !r.dismissed);
+  let records = pending;
+
+  if (dismissIdx !== -1) {
+    if (!dismissTarget) {
+      console.error("pi-live: --dismiss needs a session name or id (see pi-live --unfinished)");
+      process.exit(1);
+    }
+    const hit =
+      all.find((r) => r.name === dismissTarget) || all.find((r) => r.sessionId.startsWith(dismissTarget));
+    if (!hit) {
+      console.error(`pi-live: no session matches "${dismissTarget}"`);
+      process.exit(1);
+    }
+    if (hit.dismissed) {
+      console.log(`"${hit.name}" is already dismissed — it is not being offered for recovery.`);
+      process.exit(0);
+    }
+    markDismissed(hit.sessionId, "dismissed via pi-live");
+    console.log(`Dismissed "${hit.name}" (${hit.sessionId.slice(0, 8)}) — it will not be offered again.`);
+    console.log("Its transcript and name history are untouched. It stays readable: pi-live " + hit.name);
+    process.exit(0);
+  }
+
+  if (args.includes("--json")) {
+    // writeSync, NOT console.log.
+    //
+    // This payload is ~166 KB and the script exits immediately afterwards. Node
+    // does not flush an async stdout write before process.exit(), so piping this
+    // delivered exactly one pipe buffer and silently dropped the rest:
+    //
+    //     pi-live --json | wc -c   ->  65536    (29 of 85 sessions, invalid JSON)
+    //     pi-live --json > f       -> 166006    (85 of 85, valid JSON)
+    //
+    // File redirection hid it because file writes are synchronous. Every real
+    // consumer pipes it (the startup recovery picker, pi-tmux), so they were all
+    // reading a truncated list -- and the picker would simply not offer the
+    // sessions that fell off the end. A synchronous write cannot be truncated.
+    writeSync(1, JSON.stringify(records.map((r) => ({ ...r, state: classify(r, now) })), null, 2) + "\n");
+    process.exit(0);
+  }
+
+  if (wanted) {
+    const hit =
+      all.find((r) => r.name === wanted) ||
+      all.find((r) => r.sessionId.startsWith(wanted)) ||
+      all.find((r) => r.name.startsWith(wanted));
+    if (!hit) {
+      console.error(`pi-live: no session record matches "${wanted}"`);
+      process.exit(1);
+    }
+    const body = wantHandoff ? withLedger(handoff(hit, now), hit) : detail(hit, now);
+    console.log(hit.dismissed ? `${body}\n\n(dismissed — shown for reference, not offered for recovery)\n` : body);
+    process.exit(0);
+  }
+
+  if (onlyUnfinished) {
+    records = records.filter((r) => {
+      const s = classify(r, now);
+      if (s === "orphaned" && !r.lastPrompt) return false;
+      return s === "stalled" || s === "stranded" || s === "gone" || s === "orphaned";
+    });
+  }
+
+  if (records.length === 0) {
+    console.log("pi-live: no session records and no live pi processes found.");
+    process.exit(0);
+  }
+
+  const stateOrder = { stalled: 0, stranded: 1, orphaned: 2, gone: 3, live: 4, ended: 5 };
+  // Newest first, severity only as a tie-break: the question this table answers is
+  // "what did I just lose?", and a week-old wedged session ranked above a
+  // four-minute-old corpse answers a different one.
+  records.sort((a, b) => {
+    const byAge = b.updatedAt - a.updatedAt;
+    if (byAge !== 0) return byAge;
+    return (stateOrder[classify(a, now)] ?? 9) - (stateOrder[classify(b, now)] ?? 9);
+  });
+
+  const rows = records.map((r) => {
+    const s = classify(r, now);
+    const doing =
+      s === "orphaned"
+        ? `detached — ${r.tty} lost`
+        : s === "stranded"
+          ? `terminal silent ${silenceLabel(r, now)} — ${r.tty} unreachable`
+          : s === "gone" || s === "ended"
+            ? short(r.lastPrompt, 40)
+            : short(r.detail || r.phase, 40);
+    // A watchdog tick rewrites updatedAt, so for a session that is NOT live the record
+    // looks freshly written even when nothing has happened for days — iris sat hung on
+    // one ask_user_question for 68h and this column said "0s". Age here means "how long
+    // since this session actually did anything", so measure non-live rows from the last
+    // real progress rather than from the last bookkeeping write.
+    const seenAt = s === "live" ? r.updatedAt : Math.min(r.updatedAt, r.lastProgressAt ?? r.updatedAt);
+    // ⌀ = no transcript on disk (missing, or zero bytes). The row is still worth
+    // SHOWING — it explains where a session went, and its handoff is intact — but
+    // resuming it would start an empty session under the same id, so it must not
+    // look like pickable work in a list people scan to decide what to recover.
+    // Same question, same answer as the startup picker: core.hasTranscript().
+    const resumable = hasTranscript(r);
+    return {
+      raw: s,
+      resumable,
+      state: (STATE_LABEL[s] || s.toUpperCase()) + (r.derived ? "°" : "") + (resumable ? "" : " ⌀"),
+      name: short(r.name, 16),
+      age: (r.ageApprox ? "≥" : "") + fmtAge(seenAt, now) + (now - seenAt >= STALE_MS ? " STALE" : ""),
+      doing,
+      id: short(r.sessionId, 8),
+    };
+  });
+
+  const w = {
+    state: Math.max(5, ...rows.map((r) => r.state.length)),
+    name: Math.max(4, ...rows.map((r) => r.name.length)),
+    age: Math.max(3, ...rows.map((r) => r.age.length)),
+    doing: Math.max(5, ...rows.map((r) => r.doing.length)),
+  };
+  console.log(
+    "pi-live - real liveness (STRANDED = terminal went silent, STALLED = cut mid-stream, ORPHAN = shell died, GONE = process died)\n",
+  );
+  for (const r of rows) {
+    // Flag comes from the raw state — a derived entry's label carries a ° marker,
+    // so matching on the display string silently gave derived rows the wrong flag.
+    const flag =
+      r.raw === "stalled" ? "!" : r.raw === "stranded" ? "?" : r.raw === "orphaned" ? "~" : r.raw === "gone" ? "x" : r.raw === "live" ? "*" : "-";
+    console.log(
+      `${flag} ${r.state.padEnd(w.state)} ${r.name.padEnd(w.name)} ${r.age.padStart(w.age)}  ${r.doing.padEnd(w.doing)}  ${r.id}`,
+    );
+  }
+  console.log(`\n° = inferred from a process/transcript, not measured by a watchdog.`);
+  console.log(`STALE = older than ${STALE_MS / 3_600_000}h — an earlier sitting, not the session you just lost.`);
+  console.log(`≥ = age taken from the filename start stamp (no timestamped event left in the transcript).`);
+  console.log(`⌀ = NO TRANSCRIPT on disk — nothing to resume (resuming would start empty); its handoff still works.`);
+  console.log(`Full detail:  pi-live <name>     Handoff:  pi-live --handoff <name>`);
+  console.log(`Dismiss:      pi-live --dismiss <name>     JSON:  pi-live --json`);
+}
+
+async function boot() {
+  const core = await import(CORE_PATH);
+  ({ classify, fmtAge, silenceLabel, handoff, allRecords, verifyClaims, ledgerSections, markDismissed, STATE_LABEL, STALE_MS, hasTranscript } = core);
+  main();
+}
+
+boot().catch((err) => {
+  // Say which file failed and why. The one failure mode this design introduces
+  // is "the core moved", and a bare stack trace would send you looking here.
+  console.error(`pi-live: cannot load the liveness core\n  ${CORE_PATH}\n  ${err && err.message ? err.message : err}`);
+  process.exit(1);
+});

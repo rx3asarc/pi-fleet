@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""pi-tree — U1-U3 wired to the real fleet, plus the U10 verbs. READ-ONLY.
+
+  pi-tree                    grouped, sorted view
+  pi-tree --json             one array, keyed on sessionId
+  pi-tree --sources          dump the raw native shapes (debugging the seam)
+  pi-tree --sort=state       flat triage list: needs-you first, then working,
+                             exhausted, harvestable, idle
+  pi-tree --sort=age         the reaping queue: oldest activity first
+  pi-tree --domain=nordisk   filter to one domain (any --sort still applies)
+  pi-tree --drift            only the sessions whose tmux name and pi name differ
+
+WHY THE VERBS ARE HERE (U10)
+The consolidation that failed on 2026-10-08 was a good MANUAL procedure: it held
+for three days and the fleet was back to 47. Every step of it that can be a verb
+must be a verb, because a step a human must remember is a step that stops
+happening. `--sort=state` is "triage", `--sort=age` is "what to reap first",
+`--domain` is "focus". The probe step lives in `pi-sentinel verify`, and the
+outflow in `pi-sentinel tick`.
+
+The impure half of the seam lives in `pi_sources`; the assembly lives in
+`pi_rows`, which `pi-sentinel` shares. This file only renders.
+
+It must NEVER: kill a process, write to a session, rename anything, modify a
+transcript, or reap. This reads and prints. Nothing more.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from pi_index import bare_tmux_shells   # noqa: E402
+from pi_rows import build_rows as _build_rows  # noqa: E402
+from pi_sources import load_sources      # noqa: E402
+from pi_view import is_drifted, render, render_flat, summary  # noqa: E402
+
+
+def build_rows(sources=None, first_messages=None):
+    """Kept as a name because pi-tree's own callers (and tests) use it."""
+    return _build_rows(sources=sources, first_messages=first_messages)
+
+
+def _flag(args, name, default=None):
+    """`--sort=state` and `--sort state` both work; the bare form is what people
+    type. argparse would be fine except this file also accepts `--json` etc. with
+    no values, and a Set is the existing convention."""
+    for i, a in enumerate(args):
+        if a == f"--{name}" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(f"--{name}="):
+            return a.split("=", 1)[1]
+    return default
+
+
+def main(argv):
+    args = argv[1:]
+    flags = set(args)
+
+    if "--sources" in flags:
+        sources = load_sources()
+        print(json.dumps({k: len(v) for k, v in sources.items()}, indent=2))
+        return 0
+
+    sources = load_sources()
+    rows = build_rows(sources)
+
+    if "--json" in flags:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+
+    domain = _flag(args, "domain")
+    if domain:
+        rows = [r for r in rows if (r.get("domain") or "unscoped") == domain]
+
+    if "--drift" in flags:
+        rows = [r for r in rows if is_drifted(r)]
+
+    sort = _flag(args, "sort")
+    if sort:
+        rows = sorted(rows, key=_flat_key(sort))
+        print(render_flat(rows, sort=sort))
+        s = summary(rows)
+        print(f"\n  {s['total']} live · {s['by_state'].get('needs-you', 0)} need you"
+              f" · {s['unscoped']} unscoped · {s['drift']} drifted · sort={sort}")
+        return 0
+
+    print(render(rows))
+    shells = bare_tmux_shells(sources)
+    if shells:
+        print(f"  (+{len(shells)} bare tmux shells with no pi: {', '.join(shells)})")
+    return 0
+
+
+def _flat_key(sort):
+    if sort == "age":
+        # Oldest activity first: the reaping queue. A row with no timestamp sorts
+        # LAST, not first -- "unknown when" must never be read as "oldest".
+        def key(r):
+            ts = r.get("updated_at")
+            return (0, float(ts)) if ts else (1, 0.0)
+        return key
+    from pi_view import _sort_key
+    return _sort_key
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

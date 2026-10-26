@@ -1,0 +1,129 @@
+#!/bin/bash
+# pi-msg — talk to other pi sessions on this machine via the pi-intercom broker.
+#
+#   pi-msg list                                  # who is live
+#   pi-msg send --to <name|id> --text "msg"      # fire-and-forget
+#   pi-msg ask  --to <name|id> --text "q?" [--timeout-ms N]   # blocks for a reply
+#   pi-msg list --json
+#
+#   --wake     wake an idle/unregistered target (tmux Escape -> text -> Enter) first
+#   --force    send even when the target is not registered (accept the dead letter)
+#
+# Exit codes: 0 ok | 1 usage/connection/delivery failure | 2 ask timeout | 3 target not connected
+#
+# ── WHY THE REGISTRATION PRE-FLIGHT EXISTS (MEASURED 2026-10-13) ─────────────
+# A long-idle session DROPS its broker registration. The underlying CLI then
+# still prints success and exits 0 for `send`, so nine dispatches from
+# nordisk-goal-lead-10 were DEAD LETTERS THAT LOOKED DELIVERED; `ask` fails
+# honestly ("Target session is not currently connected") but `send` does not.
+# A lead that trusts exit 0 will sit "coordinating" an empty fleet. So: verify
+# the target is registered, and if it is not, say so and exit non-zero. Use
+# --wake to wake it (its registration returns once it runs a turn), or --force
+# to deliberately accept a dead letter.
+set -uo pipefail
+CLI="/root/.pi/agent/npm/node_modules/pi-intercom/cli.ts"
+TSX="/root/.pi/agent/npm/node_modules/tsx/dist/cli.mjs"
+[ -f "$CLI" ] || { echo "pi-intercom not installed at $CLI" >&2; exit 1; }
+
+# `ls` is a nicety for muscle memory
+if [ "${1:-}" = "ls" ]; then shift; set -- list "$@"; fi
+
+# `pi-msg fleet` — which goal sessions are ALIVE IN TMUX but NOT REGISTERED with
+# the broker (i.e. would be dead-letter targets). Per-session wake is an explicit
+# choice, never a background sweep: Escape ABORTS a working turn, so only a
+# session blocked in a modal is ever safe to unblock automatically.
+if [ "${1:-}" = "fleet" ]; then
+  shift
+  WANT_WAKE=0; [ "${1:-}" = "--wake" ] && WANT_WAKE=1
+  REG=$(/usr/bin/node "$TSX" "$CLI" list 2>/dev/null | awk '{print $1}' | tr '
+' ' ')
+  echo "tmux-alive goal sessions NOT registered (dead-letter targets):"
+  for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^nordisk-goal'); do
+    case " $REG " in *" $s "*) continue ;; esac
+    echo "  $s"
+    if [ "$WANT_WAKE" = "1" ]; then
+      pane=$(tmux list-panes -t "$s" -F '#{pane_id}' 2>/dev/null | head -1)
+      [ -n "$pane" ] || continue
+      tmux send-keys -t "$pane" Escape; sleep 1
+      tmux send-keys -t "$pane" -l "[wake] you were not registered with intercom; reply to whoever paged you once this turn starts."; sleep 1
+      tmux send-keys -t "$pane" Enter; sleep 2
+      echo "    -> woke $s (Escape + nudge); re-check registration after it runs a turn"
+    fi
+  done
+  exit 0
+fi
+
+cmd="${1:-}"
+case "$cmd" in
+  send|ask) ;;
+  *) exec /usr/bin/node "$TSX" "$CLI" "$@" ;;
+esac
+
+TO=""; WAKE=0; FORCE=0; ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --wake) WAKE=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --to) TO="${2:-}"; ARGS+=("$1" "$2"); shift 2 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+registered() {
+  /usr/bin/node "$TSX" "$CLI" list --json 2>/dev/null | python3 -c '
+import json,sys
+t=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(2)          # cannot read the broker -> do not block
+s=d.get("sessions") if isinstance(d,dict) else d
+if not isinstance(s,list): sys.exit(2)
+for e in s:
+    n=str((e or {}).get("name") or "")
+    i=str((e or {}).get("sessionId") or (e or {}).get("id") or "")
+    if n==t or i==t or (t and (i.startswith(t) or n.startswith(t))): sys.exit(0)
+sys.exit(1)
+' "$TO"
+}
+
+wake_target() {
+  # Wake by pane: Escape first (a modal swallows typed text — the goal-focus
+  # panel and the ask_user_question selector both do), then a short nudge.
+  local pane
+  pane=$(tmux list-panes -a -F '#{pane_id} #{pane_pid}' 2>/dev/null | while read -r id pid; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+    [ "$comm" = "pi" ] || continue
+    if tmux capture-pane -t "$id" -p 2>/dev/null | grep -q "$TO"; then echo "$id"; break; fi
+  done)
+  [ -n "${pane:-}" ] || { echo "wake: no tmux pane found for $TO" >&2; return 1; }
+  tmux send-keys -t "$pane" Escape; sleep 1
+  tmux send-keys -t "$pane" -l "[wake] intercom re-register check — reply to $TO's caller when your turn starts."; sleep 1
+  tmux send-keys -t "$pane" Enter; sleep 3
+  echo "wake: sent Escape+nudge to $TO (pane $pane)" >&2
+}
+
+if [ -z "$TO" ]; then echo "pi-msg: --to is required for $cmd" >&2; exit 1; fi
+
+if ! registered; then
+  rc=$?
+  if [ "$rc" -eq 1 ]; then
+    if [ "$WAKE" -eq 1 ]; then
+      wake_target || true
+      sleep 4
+      if registered; then
+        echo "note: $TO woke and re-registered" >&2
+      else
+        echo "NOT DELIVERED: $TO is not connected to the broker (dead letter)." >&2
+        echo "  The session may be idle or parked in a modal. Try: pi-msg send --wake --to $TO --text ..." >&2
+        [ "$FORCE" -eq 1 ] || exit 3
+      fi
+    else
+      echo "NOT DELIVERED: $TO is not connected to the broker; a plain send would be a dead letter." >&2
+      echo "  Waking it usually restores registration: pi-msg send --wake --to $TO --text '...'" >&2
+      echo "  Deliberately accept the dead letter with --force." >&2
+      [ "$FORCE" -eq 1 ] || exit 3
+    fi
+  fi
+  # rc=2 (broker unreadable) falls through: never block on a diagnostic failure
+fi
+
+exec /usr/bin/node "$TSX" "$CLI" "${ARGS[@]}"

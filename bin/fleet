@@ -1,0 +1,1282 @@
+#!/usr/bin/env python3
+"""
+fleet — durable tmux-backed pi workers, with evidence-gated teardown.
+
+WHY THIS EXISTS
+  pi's built-in fan-out (`workflow`, `subagent` PARALLEL) spawns *in-memory*
+  subagent sessions. They are fast, but they are not addressable (no name you
+  can message), not attachable (no tmux session), and they vanish when the run
+  ends. There is no teardown contract because nothing persists.
+  Claude Code has this feature (tmux spawn backend + lifecycle + cleanup); its
+  `orchestrating-swarms` skill describes it exactly, but its tools
+  (Teammate/Task, ~/.claude/teams) do not exist in pi.
+
+  So this file is the durability + teardown half, built from parts pi already
+  has: git worktrees, tmux, pi --name, and the pi-intercom broker (pi-msg).
+
+WHAT IT COVERS  (read this before trusting it)
+  COVERS  : discovery of tmux-backed pi workers by worktree, git state per
+            worker, status via the intercom broker, messaging, and a
+            gated teardown.
+  DOES NOT: run the workers' tasks for them, merge anything, resolve conflicts,
+            decide that work is *correct*, or reap on a timer.
+  KEYS ON : the WORKTREE PATH, never the tmux session name and never a state
+            file. A session name is a label a human can change at any moment
+            (observed: `engrane-try-section` -> `engrane-try-section-zephyr`
+            between two `tmux ls` calls). Everything is re-derived from tmux +
+            git on every run, so nothing here can go stale.
+
+THE GATE (the only reason reap is safe)
+  `reap` refuses unless ALL of these hold, and names the ones that failed:
+    1. merged    — the branch's HEAD is an ancestor of the base ref
+    2. clean     — no uncommitted changes AND no unpushed commits
+    3. idle      — not currently inside a tool call (so not mid-thought)
+    4. reported  — the worker was marked done, unless --accept-silent
+  A timer-based reaper kills a worker mid-thought and loses work. This one
+  tears down on an artifact, not on a claim and not on a clock.
+
+USAGE
+  fleet spawn <name> --brief <file> [--base <ref>] [--repo <path>] [--model <m>]
+  fleet list [--json]
+  fleet attach <name>
+  fleet send <name> <text>            fire and forget
+  fleet ask  <name> <text>            blocks for a reply
+  fleet done <name> [--note <text>] [--file PATH]... [--verify CMD] [--unsure TEXT]
+                                     record what it did, and what can be checked
+  fleet reap [--dry-run] [--accept-silent] [--abandon <name>]
+
+SPAWN LINEAGE (U11 -- cascade reaping, digest, heartbeat)
+  fleet adopt <name> [--parent <name|sessionId>] --unit <text> [--done-criteria <t>]
+                                     enroll a live session under the session that
+                                     spawned it (default parent: $PI_SESSION_ID)
+  fleet keep  <name> [--hours 2]     parent says: do not reap this child yet
+  fleet children [--of <name|sid>] [--json]
+                                     lineage + derived heartbeat + the verdict
+                                     the sentinel would reach, without acting
+  fleet reap-children [--of <name|sid>] [--dry-run|--apply] [--accept-silent]
+  fleet sentinel [--dry-run|--apply] [--idle-after-min N] [--quiet]
+                                     one cheap tick: every lineage child gets a
+                                     verdict; reap passes the SAME gate as reap,
+                                     a digest is written once, and a parent is
+                                     told only when it must decide something.
+                                     No model call, no browser, no GPU: it stats
+                                     /proc and reads JSON.
+
+Exit codes: 0 ok | 1 usage/error | 2 nothing reaped (all gates refused)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# U4: the join lives in ONE place. `fleet` no longer discovers sessions itself --
+# it consumes the same index `pi-tree` does. A fifth enumerator is the bug this
+# whole protocol exists to remove.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import fleet_children   # noqa: E402
+from fleet_children import (adopt_when_registered, load_lineage, save_lineage,  # noqa: E402
+                              _self_session_id)
+import fleet_discovery  # noqa: E402
+import fleet_entries  # noqa: E402
+import fleet_gate     # noqa: E402
+import fleet_lineage  # noqa: E402     # noqa: E402
+import pi_index       # noqa: E402
+import pi_sources     # noqa: E402
+import pi_taxonomy    # noqa: E402
+import pi_view        # noqa: E402
+from fleet_discovery import (BASE, REGISTRY, REPO, TRUST, clip, context_pct,  # noqa: E402
+                             derive_name, discover_worktrees, entries,
+                             entry_key, find, git_facts, git_worktrees,
+                             load_registry, meta_name, save_registry, seed_trust)
+from fleet_util import die, sh, store_lock  # noqa: E402
+
+# ── config ───────────────────────────────────────────────────────────────────
+# U11 — spawn lineage. A separate store from the fleet registry on purpose: the
+# registry is per-worktree intent, lineage is per-SESSION identity, and keying a
+# child by its worktree would lose every session that has none (the exact U4
+# defect, reintroduced through a side door).
+PROMPT = os.environ.get(
+    "FLEET_PROMPT",
+    "Read {brief} and execute it fully. When you are done or blocked, say so plainly "
+    "in your final message. Do not touch any other worktree.",
+)
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+def live_rows():
+    """The join's rows, with their state attached. Used by the name contract.
+
+    Deliberately lighter than `entries()`: no git facts, because deciding whether a
+    NAME may be spawned does not depend on any branch. The fleet leg is empty for
+    the same reason U4 found it matches nothing -- worktrees add facts, not names.
+    """
+    return pi_view.with_states(pi_index.build_index({
+        "panes": pi_sources.read_panes(),
+        "live": pi_sources.live_records(),
+        "registry": pi_sources.read_registry(),
+        "fleet": [],
+    }))
+
+
+def _new_session_id():
+    """A UUIDv7-shaped session id, generated HERE, not discovered afterwards.
+
+    The previous version read the id out of the newest transcript on disk and was
+    off by one spawn: it picked up the previous worker's file, so every row named
+    its predecessor's session. That is a name believed over a process — the third
+    time in one day. A spawner that mints the identity cannot be off by one.
+
+    Shape matches pi's own ids: 48-bit millisecond timestamp, then random, with
+    version 7 and the RFC 4122 variant.
+    """
+    ms = int(time.time() * 1000).to_bytes(6, "big")
+    rand = bytearray(os.urandom(10))
+    rand[0] = (rand[0] & 0x0F) | 0x70          # version 7
+    rand[2] = (rand[2] & 0x3F) | 0x80          # variant 10xx
+    raw = ms + bytes(rand)
+    h = raw.hex()
+    return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _wait_for_transcript(sid, tries=20):
+    """Poll for the transcript of a freshly minted session id.
+
+    pi creates the session file only once the first turn is written (measured
+    2026-10-26: ~12s after start), so a single look right after `tmux new-session`
+    produces a false "NO TRANSCRIPT" alarm. This checks rather than assumes, and
+    gives up out loud.
+    """
+    for _ in range(max(1, tries)):
+        hit = _transcript_for_sid(sid)
+        if hit:
+            return hit
+        time.sleep(1)
+    return None
+
+
+def _transcript_for_sid(sid):
+    """Any transcript file whose name ends with this session id. None if absent."""
+    hits = []
+    sessions = os.path.expanduser("~/.pi/agent/sessions")
+    for root, _dirs, files in os.walk(sessions):
+        for f in files:
+            if f.endswith(f"_{sid}.jsonl"):
+                hits.append(os.path.join(root, f))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _proc_identity(pid):
+    """(pid_starttime_ticks, started_at_epoch) straight from /proc.
+
+    A pid is a number, not an identity: it is reused after a reboot and under
+    churn. Recording the kernel's start time (stat field 22) alongside the pid
+    is what lets an audit later tell "this row's process is still alive" from
+    "this number now belongs to something else".
+    """
+    try:
+        stat = open(f"/proc/{pid}/stat").read().split()
+        ticks = int(stat[21])
+        uptime = float(open("/proc/uptime").read().split()[0])
+        btime = next(int(l.split()[1]) for l in open("/proc/stat")
+                     if l.startswith("btime"))
+        return ticks, btime + uptime - (ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, IndexError, ValueError, StopIteration, ZeroDivisionError):
+        return None, None
+
+
+def _uuid_from_transcript(path):
+    """The real session id, read out of the transcript filename.
+
+    `.../2026-10-26T17-55-28-574Z_<uuid>.jsonl`. Needed because the enrol path can
+    hand back a pid-keyed placeholder ('pid-<n>') when it beats the session
+    registry, and a placeholder is not an identity.
+    """
+    if not path:
+        return None
+    base = os.path.basename(str(path))
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", base)
+    return m.group(1) if m else None
+
+
+def _session_pi_identity(session, cwd=None):
+    """The pi process we just started: pid, kernel starttime, start epoch.
+
+    Matched by the process's CWD, not by tmux session name: pi renames its tmux
+    session to its own name moments after start (session-namer), measured
+    2026-10-26 when `fleet-<name>` no longer resolved while `<name>` did. The
+    cwd we passed to `tmux new-session -c` cannot be renamed by anyone.
+    """
+    want = str(cwd) if cwd else None
+    pane_pids = set()
+    rc, out, _ = sh(["tmux", "list-panes", "-t", session, "-F", "#{pane_pid}"])
+    if rc == 0:
+        pane_pids = {int(x) for x in out.split() if x.isdigit()}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().decode("utf-8", "ignore")
+        except OSError:
+            continue
+        cmd = cmd.replace("\0", " ").strip()
+        if not (cmd == "pi" or cmd.endswith("/pi") or cmd.split(" ")[-1] == "pi"):
+            continue
+        try:
+            pcwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if want and pcwd != want and pid not in pane_pids:
+            continue
+        ticks, started = _proc_identity(pid)
+        return pid, ticks, started
+    return None
+
+
+def _tmux_name_for_cwd(cwd):
+    """The tmux session whose pane is sitting in `cwd`, or None.
+
+    pi renames its tmux session to its own name seconds after start, so `fleet-<name>`
+    — the name the spawner chose — stops resolving. Resolving by the cwd we passed to
+    `tmux new-session -c` is the same anchor used for identity, and no rename reaches
+    it. A caller that cannot resolve must write the failure, never a silent None.
+    """
+    rc, out, _ = sh(["tmux", "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"])
+    if rc != 0:
+        return None, "tmux list-panes failed"
+    hits = {ln.split("\t")[0] for ln in out.splitlines()
+            if "\t" in ln and ln.split("\t", 1)[1] == str(cwd)}
+    if len(hits) == 1:
+        return hits.pop(), None
+    if not hits:
+        return None, f"no tmux pane in {cwd}"
+    return None, f"ambiguous: {len(hits)} panes report {cwd}"
+
+
+def cmd_spawn(a):
+    if not (a.brief or getattr(a, "plan", None)):
+        die("--brief is required (or --plan with --unit, which renders the brief)")
+    # THE ACK GATE (2026-10-26). A lead whose plan is awaiting acknowledgement may not
+    # spawn workers: acting on a plan nobody has read is the mis-frame failure the
+    # review named as the one gate I had skipped. Expiry is not refusal -- it proceeds
+    # and records `plan_unacked`, which the rollup prints.
+    import fleet_ack
+    _me = _self_session_id()
+    if _me:
+        try:
+            _rec = (load_lineage()["children"].get(_me) or {})
+        except Exception:
+            _rec = {}
+        if _rec:
+            ok, why = fleet_ack.can_spawn(_rec)
+            if not ok:
+                die(f"REFUSED: {why}")
+    # The name is judged FIRST, before the fetch, before the worktree, before tmux.
+    # A refusal that arrives after `git worktree add` leaves a stray worktree behind,
+    # so the cheap check has to happen before the expensive one.
+    decision = pi_taxonomy.validate_name(
+        a.name, live_rows(), unscoped=getattr(a, "unscoped", False))
+    if not decision["ok"]:
+        die(decision["error"])
+    if decision["warning"]:
+        print(f"  ! {decision['warning']}")
+
+    repo = Path(a.repo).resolve()
+    kind = getattr(a, "kind", "code")
+    worktree = repo.parent / f"{repo.name}-{a.name}"
+    if a.brief:
+        brief = Path(a.brief).resolve()
+        if not brief.is_file():
+            die(f"brief not found: {brief}")
+    else:
+        # --plan renders the brief from the slice; there is no hand-written file to
+        # read, so the destination is decided here and written after the worktree
+        # exists (see the plan_unit block below).
+        brief = worktree / "BRIEF.md"
+    branch = a.branch or f"fleet/{a.name}"
+    session = f"fleet-{a.name}"
+
+    if worktree.exists():
+        die(f"worktree already exists: {worktree}")
+    if sh(["tmux", "has-session", "-t", session])[0] == 0:
+        die(f"tmux session already exists: {session}")
+
+    base_sha_pre = ""
+    if kind == "task":
+        # TASK-KIND (2026-10-26). Research, audits and copy do not need a branch:
+        # forcing one littered the repos with 23 unmerged branches, several of which
+        # were exactly this kind of worker. A scratch dir is the honest home for work
+        # whose deliverable is a file, and it keeps `git branch` meaningful.
+        worktree = Path("/root/fleet") / a.name
+        branch = ""
+        worktree.mkdir(parents=True, exist_ok=True)
+        print(f"  scratch   {worktree} (task-kind: no branch, no worktree)")
+    else:
+        print(f"  fetching {repo.name} …")
+        rc, _, err = sh(["git", "-C", str(repo), "fetch", "origin", "--quiet"])
+        if rc != 0:
+            why = err.splitlines()[0] if err else str(rc)
+            print(f"  ! fetch failed ({why}); using local {a.base}")
+
+        rc, _, err = sh(["git", "-C", str(repo), "worktree", "add", "-b", branch,
+                         str(worktree), a.base], check=False)
+        if rc != 0:
+            die(f"worktree add failed: {err}")
+        seed_trust(str(worktree))
+
+    plan_unit = None  # set below when --plan is given; named here so the guard above cannot be unbound
+    brief_sha, brief_path = "", str(brief)
+    if plan_unit:
+        rendered = fleet_brief.render(
+            plan_unit, task=getattr(a, "task", "") or "",
+            domain=(a.name.split("-")[0] if "-" in a.name else None),
+            parent=_self_session_id(), scratch=str(worktree),
+            workers_left=getattr(a, "workers_left", None))
+        brief.parent.mkdir(parents=True, exist_ok=True)
+        Path(brief).write_text(rendered)
+        brief_sha = fleet_brief.sha(rendered)
+
+    prompt = PROMPT.format(brief=brief)
+    model = f"--model {a.model} " if a.model else ""
+    # U8: the declaration travels WITH the spawn. If the name encodes a taxonomy,
+    # the child inherits it as PI_TAXONOMY and its registry record stores it, so
+    # the classification is a byproduct of spawning rather than a later tagging
+    # act. A name with no domain exports nothing and stays honestly unscoped.
+    decl = pi_taxonomy.declaration_of_name(a.name)
+    # PI_SESSION_ID is exported into the CHILD'S ENVIRONMENT, and that retires a
+    # dependency we had been papering over: there is no pid -> session-id link in
+    # /proc (no env today, no held transcript fd, no argv), so the only map was the
+    # pi-live store. A probe that must ask the store "which session is this pid"
+    # inherits the store's errors and cannot contradict it -- which is exactly the
+    # class of defect that proposed reaping a live worker (measured 2026-10-26 by
+    # infra-ram-1). With this exported, /proc/<pid>/environ answers the question
+    # without asking any store, for every session the fleet spawns.
+    # THE SPAWNER MINTS THE SESSION ID (2026-10-26). Discovery by "newest transcript"
+    # was one spawn behind and made every row name its predecessor's session, so the
+    # liveness store had nothing to heartbeat and a live worker looked dead.
+    minted_sid = _new_session_id()
+    ours = f"PI_SESSION_ID={minted_sid} "
+    env = f"PI_TAXONOMY={decl} " if decl else ""
+    env = ours + env
+    sh(["tmux", "new-session", "-d", "-s", session, "-c", str(worktree),
+        f"{env}pi --session-id {minted_sid} --name {a.name} {model}'{prompt}'"])
+    # The tmux name can be renamed by pi within seconds of start (session-namer), so
+    # liveness is checked on the minted id's transcript instead of the name.
+    transcript = _wait_for_transcript(minted_sid)
+    if sh(["tmux", "has-session", "-t", session])[0] != 0 and not transcript:
+        die("tmux session did not start")
+
+    reg = load_registry()
+    # Identity is resolved HERE, before the row that will record it, not later and not
+    # by a name that pi is about to rename (2026-10-26).
+    ident = _session_pi_identity(session, cwd=str(worktree))
+    # The registry row carries the RESOLVED pane name, the session id and the pid.
+    # Writing `fleet-<name>` (or None) here is what made four live workers read as
+    # dead: `fleet list` computes alive from this field alone (2026-10-26).
+    pane, pane_err = _tmux_name_for_cwd(worktree)
+    reg[meta_name(str(worktree))] = {
+        "name": a.name, "worktree": str(worktree), "branch": branch,
+        "base": a.base, "brief": str(brief), "reported": False,
+        "tmux": pane, "sessionId": minted_sid,
+        "pid": ident[0] if ident else None,
+        "pid_starttime": ident[1] if ident else None,
+        "tmux_unresolved": None if pane else pane_err,
+    }
+    save_registry(reg)
+    if not pane:
+        print(f"    ! pane name NOT resolved ({pane_err}) — registry records the "
+              f"failure and `fleet list` will fall back to /proc for liveness")
+
+    print(f"\n  spawned {a.name}")
+    print(f"    worktree  {worktree}")
+    print(f"    branch    {branch}  (from {a.base})")
+    print(f"    session   {session}")
+    print(f"    attach    tmux attach -t {session}")
+    print(f"    status    fleet list")
+
+    # U11: the spawner declares the unit it spawned FOR, at spawn time. Without
+    # this the child is an orphan the moment it starts, and "which of these did
+    # I start, and for what?" is unanswerable -- which is what made the previous
+    # consolidation a manual sweep.
+    base_sha = ""
+    if kind != "task":
+        rc, sha, _ = sh(["git", "-C", str(worktree), "rev-parse", "HEAD"], check=False)
+        if rc == 0:
+            base_sha = (sha or "").strip()
+    # THE BRIEF IS RENDERED FROM ONE PLAN SLICE (2026-10-26). A worker reads its
+    # brief, not the plan, so the brief is where the contract can be lost. The slice
+    # is chosen here, the done-test is taken from the slice (not from the command
+    # line), and the brief's hash is recorded so an edit is visible as drift.
+    import fleet_brief
+    plan_unit = None
+    if getattr(a, "plan", None):
+        if not getattr(a, "unit", None):
+            die("--plan needs --unit N (which slice of the plan is this worker?)")
+        try:
+            text = Path(a.plan).read_text()
+        except OSError as ex:
+            die(f"cannot read plan {a.plan}: {ex}")
+        try:
+            plan_unit = fleet_brief.slice_plan(text, a.unit)
+        except fleet_brief.PlanError as ex:
+            die(f"REFUSED before spawning: {ex}")
+        if getattr(a, "done_test", None):
+            die("--done-test and --plan both given: the plan authors the test")
+        a.done_test = plan_unit["done_test"]
+
+    done_test = None
+    if getattr(a, "done_test", None):
+        kind = "file" if str(a.done_test).strip().lower().startswith("file:") else "cmd"
+        value = str(a.done_test).strip()
+        if kind == "file":
+            value = value.split(":", 1)[1].strip()
+        done_test = (kind, value)
+    sid = adopt_when_registered(a.name, f"execute brief {brief}", _self_session_id(),
+                                done_test=done_test, repo=str(worktree),
+                                base_sha=base_sha,
+                                task=(getattr(a, "task", "") or "").strip() or None)
+    # ── SPAWN-SIDE IDENTITY (2026-10-26) ────────────────────────────────────
+    # The row is keyed by the id THIS spawner minted. If the enrol path came back
+    # with a different id (or a `pid-<n>` placeholder, or nothing), the row is moved
+    # onto the minted id instead of being left to describe someone else's session.
+    ident = _session_pi_identity(session, cwd=str(worktree))
+    patch = {"session_id": minted_sid, "identity_source": "spawn"}
+    if ident:
+        patch.update(pid=ident[0], pid_starttime=ident[1], started_at=ident[2])
+    if transcript:
+        patch["transcript"] = transcript
+    if plan_unit:
+        patch.update(brief_path=brief_path, brief_sha=brief_sha,
+                     plan_unit=plan_unit["n"], plan_title=plan_unit["title"])
+    _lin = load_lineage()
+    _rec = _lin["children"].get(minted_sid)
+    if _rec is None and sid and sid != minted_sid:
+        # the enrol path wrote the row under the wrong key: move it, keep the count
+        _rec = _lin["children"].pop(sid)
+    if _rec is None:
+        pname = None
+        if _self_session_id():
+            pname = (by_sid := fleet_children._by_sid()).get(_self_session_id(), {}).get("name") if hasattr(fleet_children, "_by_sid") else None
+        _rec = fleet_lineage.new_child(minted_sid, a.name, _self_session_id(), pname,
+                                       f"execute brief {brief}", int(time.time()),
+                                       transcript=transcript, enrolled_source="spawn")
+        if done_test:
+            try:
+                _rec = fleet_gate.bind(_rec, done_test[0], done_test[1],
+                                       authored_by=_self_session_id(), cwd=str(worktree)) if hasattr(fleet_gate, "bind") else _rec
+            except (ValueError, TypeError):
+                pass
+    _lin["children"][minted_sid] = {**_rec, **patch}
+    save_lineage(_lin)
+    if not transcript:
+        print(f"    ! NO TRANSCRIPT for minted id {minted_sid} — the child either did "
+              f"not start or did not honour --session-id. Identity is NOT trusted.")
+    # FULL id, on purpose. An 8-char prefix displayed here is an invitation to
+    # paste it into `pi --session <prefix>`, and pi core resolves a partial id to
+    # the FIRST prefix match with no ambiguity check (dist/main.js, v1.3.0) —
+    # measured 2026-10-20: two live sessions shared `01a14a29` and the shorter id
+    # silently continued the wrong conversation. Never print a resumable id short.
+    print(f"    lineage   {'keyed ' + minted_sid if sid is not None else 'enrol raced the registry; row written from the minted id'}")
+    if ident:
+        print(f"    identity  pid {ident[0]} starttime {ident[1]} "
+              f"(recorded by the spawner, not inferred later)")
+    else:
+        print("    identity  pid NOT recorded (no pi process found for this worktree) — "
+              "rule A will have to infer this one")
+    print(f"    session   id {minted_sid} minted by the spawner")
+
+
+def cmd_ack(a):
+    """The caller confirms (or rejects) a lead's plan. The only human gate in the loop."""
+    import fleet_ack
+    lin = load_lineage()
+    kids = lin["children"]
+    match = [sid for sid, r in kids.items()
+             if sid.startswith(a.lead) or r.get("name") == a.lead]
+    if not match:
+        die(f"no lineage record for {a.lead}")
+    sid = match[0]
+    rec = kids[sid]
+    if getattr(a, "reject", None):
+        kids[sid] = fleet_ack.reject(rec, by=_self_session_id(), note=a.reject)
+        save_lineage(lin)
+        print(f"  {rec.get('name')}: plan REJECTED — the lead must re-plan")
+        return 0
+    kids[sid] = fleet_ack.ack(rec, by=_self_session_id(), note=a.note)
+    save_lineage(lin)
+    print(f"  {rec.get('name')}: plan acknowledged — the lead may spawn")
+    return 0
+
+
+def cmd_plan(a):
+    """Send a lead's plan up and open the ack window."""
+    import fleet_ack
+    import fleet_brief
+    lin = load_lineage()
+    kids = lin["children"]
+    match = [sid for sid, r in kids.items()
+             if sid.startswith(a.lead) or r.get("name") == a.lead]
+    if not match:
+        die(f"no lineage record for {a.lead}")
+    sid = match[0]
+    rec = kids[sid]
+    plan = Path(a.plan)
+    if not plan.is_file():
+        die(f"plan not found: {plan}")
+    units = fleet_brief.parse_plan(plan.read_text())
+    if not units:
+        die("the plan has no units — nothing to acknowledge")
+    missing = [f"U{u[0]}" for u in units if not u[3]]
+    if missing:
+        die(f"the plan's unit(s) {', '.join(missing)} have no done-test: a unit that "
+            f"cannot be checked cannot be spawned")
+    human = bool(getattr(a, "human", False))
+    kids[sid] = fleet_ack.arm(rec, minutes=a.minutes, required=human)
+    kids[sid]["plan_path"] = str(plan)
+    kids[sid]["plan_units"] = [u[0] for u in units]
+    save_lineage(lin)
+    print(f"  {rec.get('name')}: {len(units)} unit(s) planned")
+    if human:
+        print(f"  ack window: {a.minutes} min (fleet ack {a.lead} | --reject 'why')")
+    else:
+        print("  no ack required (caller is not human-attached) — proceed")
+    return 0
+
+
+def cmd_for(a):
+    """The front door: `fleet for "<task>"`.
+
+    One sentence in, one named manager out. This verb does not decompose, poll or
+    supervise -- it decides whether the fleet may exist, writes the manager's brief,
+    and gets out of the way (see fleet_door for the reasoning).
+    """
+    import fleet_door
+    live = live_rows()
+    names = [r.get("name") for r in live if r.get("name")]
+    held = [(r.get("name"), r.get("sessionId")) for r in live if r.get("name")]
+    me = _self_session_id()
+    parent_is_child = False
+    if me:
+        try:
+            lin = load_lineage()
+            parent_is_child = bool((lin["children"].get(me) or {})
+                                   .get("parent_session_id"))
+        except Exception:
+            parent_is_child = False
+    dec = fleet_door.decide(a.task, names, held, domain=getattr(a, "domain", None),
+                            kind=getattr(a, "kind", "code"),
+                            workers=getattr(a, "workers", None),
+                            parent_is_child=parent_is_child)
+    if not dec["ok"]:
+        die(dec["why"])
+    brief_text = fleet_door.manager_brief(
+        a.task, dec, report_to=getattr(a, "report_to", None) or me,
+        repo=getattr(a, "repo", None))
+    scratch = Path("/root/fleet") / dec["lead"]
+    scratch.mkdir(parents=True, exist_ok=True)
+    brief = scratch / "BRIEF.md"
+    brief.write_text(brief_text)
+    print(f"  door    : {dec['lead']}  (domain {dec['domain']}, "
+          f"{dec['workers_now']}/{dec['workers_allowed']} workers live)")
+    print(f"  brief   : {brief}")
+    if getattr(a, "dry_run", False):
+        print("\n  DRY RUN — nothing spawned. The brief above is what would be sent.")
+        print(brief_text)
+        return 0
+    import subprocess
+    cmd = ["fleet", "spawn", dec["lead"], "--brief", str(brief),
+           "--kind", dec["kind"] if dec["kind"] == "task" else "code",
+           "--task", a.task]
+    if getattr(a, "repo", None):
+        cmd += ["--repo", a.repo]
+    if getattr(a, "model", None):
+        cmd += ["--model", a.model]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stdout.write(p.stdout)
+    if p.returncode != 0:
+        sys.stderr.write(p.stderr)
+        die(f"spawn failed (rc={p.returncode})")
+    print(f"\n  fleet open. Report it back with:")
+    print(f"    fleet rollup {dec['lead']} --report-to {me or '<you>'}")
+    return 0
+
+
+def cmd_list(a):
+    es = entries()
+    if a.json:
+        print(json.dumps(es, indent=2))
+        return 0
+    if not es:
+        print("  no fleets. spawn one:  fleet spawn <name> --brief <file>")
+        return 0
+
+    hdr = f"{'name':<24}{'state':<14}{'branch':<30}{'head':<9}{'+/-':<8}{'ctx':<12}{'merged':<7}"
+    print(hdr)
+    print("-" * len(hdr))
+    for e in es:
+        ah = f"{e.get('ahead', '?')}/{e.get('unpushed', '?')}"
+        dirty = e.get("dirty")
+        if dirty:
+            ah += f" *{dirty}"
+        state = "dead" if not e["alive"] else (e.get("pi_status") or "?")
+        print(f"{clip(e['name'], 24):<24}{clip(state, 14):<14}"
+              f"{clip(e.get('branch') or '-', 30):<30}"
+              f"{clip(e.get('head') or '-', 9):<9}{ah:<8}"
+              f"{clip(e.get('context') or '-', 12):<12}"
+              f"{('yes' if e.get('merged') else 'no'):<7}")
+    print("\n  +/-  = commits ahead of base / unpushed   *N = uncommitted files")
+    print("  ctx  = context used / window            merged = HEAD in base")
+    return 0
+
+
+def cmd_attach(a):
+    e = find(a.name)
+    if not e or not e["alive"]:
+        die(f"no live fleet named {a.name}")
+    os.execvp("tmux", ["tmux", "attach", "-t", e["session"]])
+
+
+def _policy_check(target_sid):
+    """Default-deny worker-to-worker (fleet_policy has the reasoning)."""
+    import fleet_policy
+    me = _self_session_id()
+    lin = load_lineage()["children"]
+    target = lin.get(target_sid) or {}
+    sender = {**lin.get(me or "", {}), "sessionId": me}
+    ok, why = fleet_policy.may_message(sender, target)
+    if not ok:
+        die(why)
+
+
+def cmd_send(a):
+    e = find(a.name)
+    if not e:
+        die(f"no fleet named {a.name}")
+    _policy_check(e.get("sessionId"))
+    target = e.get("pi_status") and e["name"] or e["name"]
+    rc, out, err = sh(["pi-msg", "send", "--to", target, "--text", a.text])
+    if rc != 0:
+        die(f"send failed: {err or out}")
+    print(f"  sent to {a.name}")
+
+
+def cmd_ask(a):
+    e = find(a.name)
+    if not e:
+        die(f"no fleet named {a.name}")
+    _policy_check(e.get("sessionId"))
+    rc, out, err = sh(["pi-msg", "ask", "--to", e["name"], "--text", a.text,
+                       "--timeout-ms", str(a.timeout_ms)])
+    if rc == 2:
+        die(f"no reply from {a.name} within {a.timeout_ms}ms")
+    if rc != 0:
+        die(f"ask failed: {err or out}")
+    print(out)
+
+
+def cmd_relabel(a):
+    """Lineage-vs-world name drift. Read-only unless --apply (marrow, 2026-10-26).
+
+    `pi-tree --drift` compares tmux against pi; both agreed on `onboarding` while the
+    LINEAGE said `quartz`, so the disagreement lived between the lineage and the world
+    and no tool looked there. A step that happens beats a step a human remembers.
+    """
+    import fleet_name_drift as nd
+    argv = []
+    if getattr(a, "apply", False):
+        argv.append("--apply")
+    if getattr(a, "closed", False):
+        argv.append("--closed")
+    if getattr(a, "json", False):
+        argv.append("--json")
+    return nd.main(argv)
+
+
+def _find_anywhere(name):
+    """Registry first, then the LINEAGE. A name that exists in lineage is a real fleet.
+
+    `fleet done infra-ram-1` answered "no fleet named infra-ram-1" while a lineage row
+    for it sat on disk with pid, session id and transcript (measured 2026-10-26 by
+    larch). The registry and the lineage each hold names the other does not, and a
+    completion event that can only reach one of its two readers is the defect, not the
+    missing registry row. Returns a minimal entry when only lineage knows the name.
+    """
+    e = find(name)
+    if e:
+        return e
+    try:
+        import fleet_children as _fc
+        children = _fc.load_lineage().get("children") or {}
+    except Exception:
+        return None
+    for sid, row in children.items():
+        if not isinstance(row, dict) or row.get("name") != name:
+            continue
+        if row.get("verdict") in ("dismissed", "reaped"):
+            continue                      # a closed record is history, not a target
+        return {"name": name, "sessionId": sid, "worktree": row.get("worktree"),
+                "pid": row.get("pid"), "files": row.get("files"),
+                "branch": row.get("branch"), "lineage_only": True}
+    return None
+
+
+def cmd_done(a):
+    e = _find_anywhere(a.name)
+    if not e:
+        die(f"no fleet named {a.name}")
+    # TWO stores, one event: the registry (`reported`) and the lineage (claims +
+    # reported_at). Both are read-modify-write, and the sentinel does the same thing
+    # from a different process, so without the lock a concurrent tick can clobber this
+    # report -- registry says reported, lineage says claims null. That is the exact
+    # lost update store_lock exists for, and `done` was the one writer not asking for
+    # it (found by a peer's claim, verified here 2026-10-17).
+    with store_lock():
+        rc = _cmd_done_locked(a, e)
+    # REAP ON THE EVENT, NOT THE TIMER (2026-10-26, pi-moa objection 9). A 10-minute
+    # tick is blind to a worker that finished in twenty seconds, and a wrong-and-exited
+    # worker burns its whole window before anyone notices. The report is the event, so
+    # the same gate runs now; the tick stays as a backstop for everything that never
+    # reports. Nothing here bypasses a gate -- it is the identical code path.
+    if rc == 0 and not getattr(a, "no_reap", False):
+        import types
+        try:
+            cmd_reap(types.SimpleNamespace(abandon=None,
+                                           accept_silent=getattr(a, "accept_silent",
+                                                                 False)))
+        except SystemExit:
+            pass
+        except Exception as ex:
+            print(f"  ! immediate reap failed ({ex}); the sentinel will retry")
+    return rc
+
+
+def _cmd_done_locked(a, e):
+    # THE REPORT MUST BE THE FROZEN EVIDENCE (2026-10-26). This is the check the
+    # adversarial review called the highest-cost flaw in the whole design: before
+    # it, a worker could report `--verify "the test I just wrote"` and the reaper
+    # would re-run a green command and record `verified`. The frozen done-test is
+    # authored by the plan; the worker's job is to have run it, not to name it.
+    import fleet_done_test
+    reg = load_registry()
+    key = entry_key(e)
+    reg.setdefault(key, {"name": a.name, "worktree": e["worktree"],
+                         "branch": e.get("branch")})
+    reg[key]["reported"] = True
+    if a.note:
+        reg[key]["note"] = a.note
+    save_registry(reg)
+
+    # U11 bridge: "reported" is one event with two readers. Without this, a child
+    # could report (`fleet done`) and still be held forever by the sentinel,
+    # because the lineage record is a different store from the fleet registry.
+    import time as _t
+    sid = e.get("sessionId")
+    lin = load_lineage()
+    rec = (lin["children"].get(sid) if sid else None) or {}
+    if rec:
+        dt = fleet_done_test.frozen(rec)
+        if dt:
+            for kind, claimed in (("cmd", a.verify), ("file", None)):
+                if kind == "file":
+                    continue
+                ok, why = fleet_done_test.check_binding(rec, claimed, kind="cmd")
+                if not ok:
+                    die(f"REFUSED {a.name}: {why}")
+            if dt["kind"] == "file":
+                claimed_files = [str(f) for f in (a.file or ())]
+                if not claimed_files:
+                    die(f"REFUSED {a.name}: this unit's done-test is the file "
+                        f"{dt['path']!r} — report it with --file")
+                want = str(dt["path"]).strip()
+                if not any(f.strip() == want or f.strip().endswith(want)
+                           for f in claimed_files):
+                    die(f"REFUSED {a.name}: claimed file is not the frozen "
+                        f"done-test file {want!r}")
+    claims_v2 = []
+    cf = getattr(a, "claim_file", None)
+    if cf:
+        import json as _json
+        import fleet_rollup
+        try:
+            raw = _json.loads(Path(cf).read_text())
+        except (OSError, ValueError) as ex:
+            die(f"REFUSED {a.name}: cannot read claim file {cf} ({ex})")
+        claims_v2, errs = fleet_rollup.validate_claims(raw)
+        if errs:
+            die("REFUSED " + a.name + ": malformed claims —\n      "
+                + "\n      ".join(errs[:6]))
+    if sid and sid in lin["children"]:
+        lin["children"][sid] = fleet_lineage.record_claims(
+            lin["children"][sid], a.file, a.verify, a.unsure)
+        if claims_v2:
+            lin["children"][sid] = {**lin["children"][sid], "claims_v2": claims_v2}
+        lin["children"][sid] = fleet_lineage.mark_reported(
+            lin["children"][sid], a.note, int(_t.time()))
+        save_lineage(lin)
+        print(f"  lineage: {a.name} recorded as complete "
+              f"(sentinel may now reap it)")
+    print(f"  {a.name} marked reported" + (f": {a.note}" if a.note else ""))
+
+
+def cmd_reverify(a):
+    """Re-run the stored claims against the filesystem. Asserts nothing new.
+
+    WHY (2026-10-26). A verifier can be wrong in the accusing direction: the legacy
+    path ran a worker's command with cwd=/root, so `scripts/build_css.py` "failed" and
+    the rollup printed FAILED(rc=2) for a unit that was never run where it lives. The
+    claims were fine; the check was in the wrong room. Re-running the SAME claims under
+    a fixed verifier does not weaken a gate -- it removes a false red, and records the
+    re-run so the history shows the correction.
+    """
+    lin = load_lineage()
+    kids = lin["children"]
+    match = [sid for sid, r in kids.items()
+             if sid.startswith(a.name) or r.get("name") == a.name]
+    if not match:
+        die(f"no lineage record for {a.name}")
+    sid = match[0]
+    rec = dict(kids[sid])
+    before = ((rec.get("checks") or {}).get("verify") or {}).get("rc")
+    checks = fleet_children.verify_claims(rec)
+    rec["checks"] = checks
+    rec["reverified_at"] = int(time.time())
+    rec["reverified_before_rc"] = before
+    v = checks.get("verify") or {}
+    if not v:
+        print(f"  {rec.get('name')}: no verify command on record — nothing to run")
+        return 1
+    if v.get("unrunnable"):
+        print(f"  {rec.get('name')}: UNRUN — {v.get('tail')}")
+    else:
+        print(f"  {rec.get('name')}: rc {before} -> {v.get('rc')}  "
+              f"({str(v.get('tail'))[:110]})")
+    if not getattr(a, "dry_run", False):
+        kids[sid] = rec
+        save_lineage(lin)
+    else:
+        print("  DRY RUN — the record was not updated")
+    return 0
+
+
+def cmd_reap(a):
+    es = entries()
+    if a.abandon:
+        es = [e for e in es if e["name"] == a.abandon]
+        if not es:
+            die(f"no fleet named {a.abandon}")
+        for e in es:
+            print(f"  {e['name']}: ABANDONED by request — skipping the merged gate")
+            _teardown(e, a, skip_gates=True)
+        return 0
+
+    # A LIVE PID WITH NO PANE IS A STOP, NOT A TARGET. `entries()` derives aliveness
+    # from "has a tmux pane", and pi daemons outlive their panes (measured 2026-10-26:
+    # 20 live pids, 0 panes after the tmux server restarted). `_teardown` skips the
+    # session kill when there is no pane but still runs `git worktree remove --force`,
+    # so this path would have deleted the working trees of live sessions and pruned
+    # their branches. The cascade keeps its own evidence-based path; this sweep does
+    # not get to guess.
+    import pi_sources
+    import fleet_ground_truth
+    try:
+        truth = fleet_ground_truth.truth_from(pi_sources)
+    except Exception:
+        truth = {}
+
+    acted = 0
+    for e in es:
+        row = truth.get(e.get("sessionId")) or {}
+        if row.get("alive") and not e.get("session"):
+            # The store said "no pane name". Before refusing, ASK THE WORLD: the pane
+            # may exist and simply not be named in the record (measured 2026-10-26 —
+            # `fleet reap` refused four workers whose panes were listed by
+            # `tmux list-panes -a`, because `entries()` reads the pane name from the
+            # STORE row and the store row had null). Resolve by the cwd anchor and
+            # require the pane's single child to BE the recorded pid: a name is not an
+            # identity, so a resolved pane is accepted only with the pid to match it.
+            _cand, _why = _tmux_name_for_cwd(e.get("worktree") or "")
+            _pid = row.get("pid")
+            if _cand and _pid:
+                _rc, _pane, _ = sh(["tmux", "list-panes", "-t", "=" + _cand,
+                                    "-F", "#{pane_pid}"])
+                _pane = _pane.strip().splitlines()[0] if _rc == 0 and _pane.strip() else ""
+                if _pane.isdigit():
+                    _rc2, _kids, _ = sh(["pgrep", "-P", _pane])
+                    _kids = [k for k in _kids.split() if k.strip()]
+                    if _rc2 == 0 and _kids == [str(_pid)]:
+                        print(f"  {e['name']}: pane resolved by cwd -> {_cand} "
+                              f"(pane {_pane}, child {_pid} matches the record)")
+                        e["session"] = _cand
+            if not e.get("session"):
+                print(f"  {e['name']}: REFUSED")
+                print(f"      - pid {row.get('pid')} is running but has no tmux pane: the "
+                      f"session is alive, we just cannot see its shell"
+                      f"{(' (' + _why + ')') if _why else ''}. Reaping this would "
+                      f"force-remove a working tree that is still in use")
+                continue
+        # Ownership is resolved here and only here: it needs a subprocess per
+        # session, and it only matters when something is about to be killed.
+        if e.get("session"):
+            e = {**e, "owner_tmux": owner_tmux_of(e.get("sessionId"))}
+        blockers = gate(e, accept_silent=a.accept_silent)
+        if blockers:
+            print(f"  {e['name']}: REFUSED")
+            for b in blockers:
+                print(f"      - {b}")
+            continue
+        acted += _teardown(e, a)
+    if not acted:
+        print("\n  nothing reaped (every fleet failed a gate, or there were none)")
+        return 2
+    return 0
+
+
+def owner_tmux_of(session_id):
+    """The tmux session `pi-tmux --live-owner` says owns this sessionId.
+
+    Resolved by pi-tmux's OWN guard rather than by our join, deliberately: two
+    independent resolutions must agree before we kill anything, and this is the
+    second one. Returns None when no live pi owns the id (which the gate treats
+    as unproven, never as agreement), "" when the owner is not in tmux at all,
+    else the tmux session name.
+
+    Only called from reap. Doing this for every entry would cost one subprocess
+    per session on every `fleet list`.
+    """
+    if not session_id:
+        return None
+    rc, out, _ = sh(["pi-tmux", "--live-owner", str(session_id)])
+    if rc != 0 or not out.strip():
+        return None
+    fields = out.splitlines()[0].split("\t")
+    return fields[5] if len(fields) > 5 else ""
+
+
+def gate(e, accept_silent=False):
+    """Delegates to the PURE provider gate in `fleet_gate`.
+
+    The decision is pure and fixture-tested. Only the filesystem question --
+    "does this worktree still exist?" -- is answered here, in the impure half,
+    and handed over as a fact.
+    """
+    return fleet_gate.gate(
+        e,
+        worktree_exists=os.path.isdir(e.get("worktree") or ""),
+        accept_silent=accept_silent,
+        base=BASE,
+    )
+
+
+def _wait_gone(pid, timeout):
+    """True once /proc/<pid> is gone. Bounded, polled, never a blind sleep."""
+    import time as _t
+    end = _t.time() + float(timeout)
+    while _t.time() < end:
+        if not os.path.isdir(f"/proc/{int(pid)}"):
+            return True
+        _t.sleep(0.25)
+    return not os.path.isdir(f"/proc/{int(pid)}")
+
+
+def _teardown(e, a, skip_gates=False):
+    wt, session = e.get("worktree"), e.get("session")
+    print(f"  {e['name']}: {'would reap' if a.dry_run else 'REAPING'}")
+    print(f"      worktree {wt}")
+    print(f"      branch   {e.get('branch')}  head {e.get('head')}")
+
+    if a.dry_run:
+        print("      (dry run — nothing changed)")
+        return 1 if not skip_gates else 0
+
+    _kp = e.get("pid")
+    if session:
+        if wt:
+            # Git class: unchanged. U5 required this path to stay identical, and
+            # there is no reason to re-open a path that already works.
+            sh(["tmux", "kill-session", "-t", session])
+            # ...then WAIT. tmux delivers the signal; pi then takes 4-13s to exit
+            # (measured by infra-ram-1 on this box: 4.2 / 9.4 / 12.7s — extension
+            # teardown). Removing the worktree immediately after the signal left a
+            # live pi finishing its shutdown with `cwd = <worktree> (deleted)`, i.e.
+            # the exact state the refusal message exists to prevent, produced by the
+            # reaper. Verified 2026-10-26: reap printed REAPING, worktree gone, pid
+            # 449674 still state S. Wait for the process, then escalate, then wait.
+            if _kp and not _wait_gone(_kp, 20.0):
+                os.kill(_kp, 9) if hasattr(os, "kill") else None
+                _wait_gone(_kp, 3.0)
+        else:
+            # Session class: `pi-tmux --close` is already the class-aware
+            # teardown, so this SHARES it rather than writing a second one.
+            # It SIGTERMs pi so it exits the way a normal quit would, kills
+            # tmux only as a fallback, refuses to close the session it is
+            # running inside, and deliberately leaves the transcript and name
+            # history alone -- "closing means no longer running, not erased".
+            rc, _, _ = sh(["pi-tmux", "--close", session])
+            if rc != 0:
+                # `--close` refuses a tmux session with no pi in it. A session
+                # whose pi has already exited is exactly that case, and leaving
+                # the shell behind would report a teardown that never happened.
+                # An empty tmux shell has no transcript to protect.
+                sh(["tmux", "kill-session", "-t", session])
+
+    if wt and os.path.isdir(wt):
+        rc, _, err = sh(["git", "-C", str(REPO), "worktree", "remove", "--force", wt])
+        if rc != 0:
+            shutil.rmtree(wt, ignore_errors=True)
+            sh(["git", "-C", str(REPO), "worktree", "prune"])
+
+    # `git branch -d` refuses to delete an unmerged branch — a second guard
+    if e.get("branch") and not skip_gates:
+        sh(["git", "-C", str(REPO), "branch", "-d", e["branch"]])
+    elif e.get("branch"):
+        sh(["git", "-C", str(REPO), "branch", "-D", e["branch"]])
+
+    reg = load_registry()
+    reg.pop(entry_key(e), None)
+    save_registry(reg)
+
+    if TRUST.exists():
+        try:
+            t = json.loads(TRUST.read_text())
+            t.pop(os.path.realpath(wt or ""), None)
+            TRUST.write_text(json.dumps(t, indent=2, sort_keys=True) + "\n")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return 1
+
+
+# ── cli ──────────────────────────────────────────────────────────────────────
+def main():
+    # One binding, once. fleet_children owns no index of its own: it uses the
+    # same `entries()` the rest of this file uses, so a child cannot be seen by
+    # the reaper and invisible to `fleet list`.
+    fleet_children.configure(entries=entries, find=find, sh=sh,
+                             owner_tmux_of=owner_tmux_of, die=die, clip=clip,
+                             base=BASE)
+    p = argparse.ArgumentParser(prog="fleet", description=__doc__.split("\n")[1],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("spawn", help="worktree + branch + tmux + pi + brief")
+    s.add_argument("name")
+    s.add_argument("--brief", help="brief file (required unless --plan is given)")
+    s.add_argument("--task", default="",
+                   help="the task as the human phrased it, quoted verbatim in the brief")
+    s.add_argument("--base", default=BASE)
+    s.add_argument("--repo", default=str(REPO))
+    s.add_argument("--branch")
+    s.add_argument("--model")
+    s.add_argument("--unscoped", action="store_true",
+                   help="spawn with a name that declares no domain")
+    s.add_argument("--plan", metavar="PLAN.md",
+                   help="the lead's plan; the brief is rendered from ONE unit slice so "
+                        "a worker cannot be briefed on another unit's business")
+    s.add_argument("--kind", choices=("code", "task"), default="code",
+                   help="code: worktree+branch. task: scratch dir, no branch "
+                        "(research, audits, copy)")
+    s.add_argument("--unit", type=int, metavar="N",
+                   help="which plan unit this worker executes (requires --plan)")
+    s.add_argument("--done-test", metavar="CMD|file:PATH",
+                   help="the frozen test that decides whether this unit is done. "
+                        "Authored by the plan, reported verbatim, run at reap in a "
+                        "clean tree. Without it the worker's own choice is the bar.")
+    s.set_defaults(fn=cmd_spawn)
+
+    s = sub.add_parser("list", help="status of every fleet")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("attach", help="tmux attach to a fleet")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_attach)
+
+    s = sub.add_parser("send", help="fire-and-forget message")
+    s.add_argument("name")
+    s.add_argument("text")
+    s.set_defaults(fn=cmd_send)
+
+    s = sub.add_parser("ask", help="message and block for a reply")
+    s.add_argument("name")
+    s.add_argument("text")
+    s.add_argument("--timeout-ms", type=int, default=300000)
+    s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("done", help="record that a fleet reported its findings")
+    s.add_argument("name")
+    s.add_argument("--note")
+    s.add_argument("--file", action="append", default=[], metavar="PATH",
+                   help="a file you wrote (repeatable); the reaper checks it exists")
+    s.add_argument("--verify", metavar="CMD",
+                   help="a command that proves the unit (exit 0 = proven)")
+    s.add_argument("--unsure", metavar="TEXT",
+                   help="what you could not verify, passed through verbatim")
+    s.add_argument("--no-reap", action="store_true",
+                   help="do not attempt an immediate reap after reporting")
+    s.add_argument("--accept-silent", action="store_true")
+    s.add_argument("--claim-file", metavar="JSON",
+                   help="typed claims: [{claim_id, assertion_key, value, polarity, "
+                        "evidence_ref}] — conflicts between workers become computable")
+    s.set_defaults(fn=cmd_done)
+
+    s = sub.add_parser("adopt", help="enroll a spawned session under its parent")
+    s.add_argument("name")
+    s.add_argument("--parent", default="auto",
+                   help="parent name/sessionId, 'auto' = $PI_SESSION_ID, 'none' = no parent")
+    s.add_argument("--unit", default=None,
+                   help="what this child was spawned to do (required only for a "
+                        "session the store has never seen)")
+    s.add_argument("--done-criteria")
+    s.add_argument("--relabel", action="store_true",
+                   help="set the record's name to the one resolved by sessionId, "
+                        "keeping the old one as name_changed_from (audited)")
+    s.set_defaults(fn=fleet_children.cmd_adopt)
+
+    s = sub.add_parser("reverify",
+                       help="re-run a unit's stored claims under a fixed verifier")
+    s.add_argument("name")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_reverify)
+
+    s = sub.add_parser("keep", help="parent: do not reap this child yet")
+    s.add_argument("name")
+    s.add_argument("--hours", type=float, default=2.0, help="0 clears the keep")
+    s.set_defaults(fn=fleet_children.cmd_keep)
+
+    s = sub.add_parser("children", help="lineage with heartbeat and the proposal")
+    s.add_argument("--of", help="only children of this parent")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=fleet_children.cmd_children)
+
+    s = sub.add_parser("scan", help="find live sessions with no lineage record")
+    s.add_argument("--apply", action="store_true", help="enrol them as orphans")
+    s.set_defaults(fn=fleet_children.cmd_scan)
+
+    s = sub.add_parser("revive", help="undo a dismiss or a reap")
+    s.add_argument("name")
+    s.add_argument("--unit", help="redeclare the unit while reviving")
+    s.set_defaults(fn=fleet_children.cmd_revive)
+
+    s = sub.add_parser("dismiss", help="close a DECIDE without killing anything")
+    s.add_argument("name")
+    s.add_argument("--note")
+    s.set_defaults(fn=fleet_children.cmd_dismiss)
+
+    s = sub.add_parser("reader", help="render the adversarial review brief (original task)")
+    s.add_argument("name")
+    s.add_argument("--artifact", default=None)
+    s.add_argument("--out", default="")
+    s.add_argument("--stdout", action="store_true")
+    s.set_defaults(fn=fleet_children.cmd_reader)
+
+    s = sub.add_parser("reader-verdict", help="record PASSES / FAILS for a unit")
+    s.add_argument("name")
+    s.add_argument("--fail", default=None, metavar="WHY")
+    s.add_argument("--pass", dest="pass_", default=None, metavar="WHAT_YOU_CHECKED")
+    s.set_defaults(fn=fleet_children.cmd_reader_verdict)
+
+    s = sub.add_parser("integration", help="run the cross-unit check in a clean tree")
+    s.add_argument("lead")
+    s.add_argument("--cmd", required=True)
+    s.add_argument("--repo", default=None, help="override the lead's repo")
+    s.add_argument("--base-sha", default=None,
+                   help="override the commit to check out (e.g. the merge commit)")
+    s.add_argument("--timeout", type=int, default=900)
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=fleet_children.cmd_integration)
+
+    s = sub.add_parser("plan", help="send a lead's plan up and open the ack window")
+    s.add_argument("lead")
+    s.add_argument("--plan", required=True, help="plan.md (every unit needs a done-test)")
+    s.add_argument("--human", action="store_true",
+                   help="the caller is human-attached: a bounded ack window applies")
+    s.add_argument("--minutes", type=int, default=15)
+    s.set_defaults(fn=cmd_plan)
+
+    s = sub.add_parser("ack", help="caller confirms or rejects a lead's plan")
+    s.add_argument("lead")
+    s.add_argument("--note", default=None)
+    s.add_argument("--reject", default=None, metavar="WHY")
+    s.set_defaults(fn=cmd_ack)
+
+    s = sub.add_parser("for", help='open a fleet for a task: fleet for "<task>"')
+    s.add_argument("task", help="the task, as the human phrased it (quoted verbatim)")
+    s.add_argument("--domain", default=None)
+    s.add_argument("--kind", choices=("code", "task"), default="task")
+    s.add_argument("--repo", default=None)
+    s.add_argument("--workers", type=int, default=None, help="override the cap")
+    s.add_argument("--report-to", default=None, help="sessionId to report the rollup to")
+    s.add_argument("--model", default=None)
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_for)
+
+    s = sub.add_parser("rollup",
+                       help="assemble a lead's evidence into one report (no model)")
+    s.add_argument("lead", help="the lead's sessionId or name")
+    s.add_argument("--out", default="", help="report path (default: docs/reports/<date>-rollup-<lead>.md)")
+    s.add_argument("--report-to", default="", help="sessionId/name to deliver to (wakes it)")
+    s.add_argument("--aborted", action="store_true", help="mark the rollup as partial")
+    s.add_argument("--stdout", action="store_true", help="also print the rollup")
+    s.set_defaults(fn=fleet_children.cmd_rollup)
+
+    s = sub.add_parser("reconcile",
+                       help="rebuild who-is-alive from tmux + /proc; the store is a cache")
+    s.add_argument("--apply", action="store_true",
+                   help="mark unconfirmed rows stale (backs up first; deletes nothing)")
+    s.set_defaults(fn=fleet_children.cmd_reconcile)
+
+    s = sub.add_parser("sweep-lineage",
+                       help="close dead records, merge duplicate keys, unprotect adopted orphans")
+    s.add_argument("--apply", action="store_true", help="actually write (default is dry run)")
+    s.add_argument("--note", help="the disposition written into `why` for closed records")
+    s.set_defaults(fn=fleet_children.cmd_sweep_lineage)
+
+    s = sub.add_parser("reap-children", help="cascade-reap the children of a session")
+    s.add_argument("--of")
+    s.add_argument("--dry-run", action="store_true", help="default")
+    s.add_argument("--apply", action="store_true", help="actually reap")
+    s.add_argument("--accept-silent", action="store_true")
+    s.add_argument("--idle-after-min", type=int, default=30)
+    s.set_defaults(fn=fleet_children.cmd_reap_children)
+
+    s = sub.add_parser("sentinel", help="one cheap autonomous tick: propose, gate, digest, reap")
+    s.add_argument("--dry-run", action="store_true", help="default")
+    s.add_argument("--apply", action="store_true", help="actually reap")
+    s.add_argument("--accept-silent", action="store_true")
+    s.add_argument("--idle-after-min", type=int, default=30)
+    s.add_argument("--grace-min", type=float, default=10,
+                   help="how long a dead parent's silent child is announced "
+                        "before it is swept silently (default 10)")
+    s.add_argument("--verify-budget-s", type=int, default=90,
+                   help="total seconds spent re-running proofs per tick")
+    s.add_argument("--quiet", action="store_true", help="never message a parent")
+    s.set_defaults(fn=fleet_children.cmd_sentinel)
+
+    s = sub.add_parser("relabel", help="lineage-vs-world name drift (read-only unless --apply)")
+    s.add_argument("--apply", action="store_true",
+                   help="repair each drift via `fleet adopt <world> --relabel --parent none`")
+    s.add_argument("--closed", action="store_true", help="include closed records")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_relabel)
+
+    s = sub.add_parser("reap", help="tear down fleets that pass every gate")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--accept-silent", action="store_true",
+                   help="allow teardown of a worker that never reported")
+    s.add_argument("--abandon", help="explicitly abandon one fleet (skips the merged gate)")
+    s.set_defaults(fn=cmd_reap)
+
+    a = p.parse_args()
+    sys.exit(a.fn(a) or 0)
+
+
+if __name__ == "__main__":
+    main()

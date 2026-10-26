@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * pi-peers — list live pi sessions by NAME, with tty and what each was last asked.
+ *
+ *   pi-peers            table of live peers
+ *   pi-peers --json     machine-readable
+ *
+ * Reads the session registry written by the session-namer extension
+ * (~/.pi/agent/session-names/*.json) and joins it with intercom's live roster
+ * for status. Entries whose process is gone are pruned.
+ */
+"use strict";
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execFileSync } = require("child_process");
+
+const HOME = process.env.HOME || os.homedir();
+const REGISTRY = path.join(HOME, ".pi/agent/session-names");
+const PI_MSG = path.join(HOME, ".pi/agent/bin/pi-msg");
+const json = process.argv.includes("--json");
+
+function intercomRoster() {
+  try {
+    const raw = execFileSync(PI_MSG, ["list", "--json"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    });
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.sessions) ? parsed.sessions : [];
+  } catch {
+    return null; // broker unreachable
+  }
+}
+
+function alive(pid) {
+  if (typeof pid !== "number" || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function load() {
+  let files;
+  try {
+    files = fs.readdirSync(REGISTRY).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const file of files) {
+    const full = path.join(REGISTRY, file);
+    let entry;
+    try {
+      entry = JSON.parse(fs.readFileSync(full, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!entry || !entry.name) continue;
+    if (!alive(entry.pid)) {
+      try { fs.unlinkSync(full); } catch { /* ignore */ }
+      continue;
+    }
+    rows.push(entry);
+  }
+  return rows.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function age(ts) {
+  if (!ts) return "-";
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.round(secs / 60) + "m";
+  return Math.round(secs / 3600) + "h";
+}
+
+const roster = intercomRoster();
+const statusByName = new Map();
+if (roster) {
+  for (const s of roster) {
+    if (s && s.name && s.status) statusByName.set(String(s.name).toLowerCase(), s.status);
+  }
+}
+
+const rows = load().map((entry) => ({
+  name: entry.name,
+  id: entry.sessionId,
+  tty: entry.tty || "no-tty",
+  status: statusByName.get(String(entry.name).toLowerCase()) || (roster ? "not-registered" : "unknown"),
+  age: age(entry.updatedAt),
+  cwd: entry.cwd || "",
+  topic: (entry.topic || "").replace(/\s+/g, " ").trim(),
+}));
+
+if (json) {
+  process.stdout.write(JSON.stringify({ broker: roster ? "up" : "down", sessions: rows }, null, 2) + "\n");
+  process.exit(0);
+}
+
+if (rows.length === 0) {
+  console.log("no live pi sessions");
+  if (!roster) console.log("(intercom broker unreachable — no intercom-enabled session is running)");
+  process.exit(0);
+}
+
+const w = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s.padEnd(n));
+console.log(`${w("NAME", 17)}${w("TTY", 9)}${w("STATUS", 12)}${w("AGE", 5)}${w("CWD", 12)}TOPIC`);
+for (const r of rows) {
+  console.log(`${w(r.name, 17)}${w(r.tty, 9)}${w(r.status, 12)}${w(r.age, 5)}${w(r.cwd, 12)}${r.topic || "-"}`);
+}
+if (!roster) console.log("\n(intercom broker unreachable — names above are from the registry only)");

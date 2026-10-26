@@ -1,0 +1,790 @@
+#!/usr/bin/env bash
+#
+# pi-tmux — run pi inside tmux so an SSH drop, laptop sleep, or network cut
+# can no longer kill the session.
+#
+# WHY THIS EXISTS
+#   pi is normally a direct child of the SSH login shell, so its controlling
+#   terminal IS the sshd pty. When that pty dies the kernel sends SIGHUP, and
+#   pi's own handler runs:
+#
+#       handler = () => { killTrackedDetachedChildren(), this.shutdown({fromSignal:!0}) }
+#       async shutdown(o){ ... o?.fromSignal && ( ..., process.exit(0) ) }
+#
+#   process.exit(0) is reached unconditionally — no extension can veto it.
+#   (`session_shutdown` is notification-only, and the event cannot even tell a
+#   SIGHUP apart from a normal quit.) So the ONLY fix is to stop the sshd pty
+#   from being pi's controlling terminal: hand pi to the tmux server instead.
+#   The tmux server owns a pty of its own and holds it open with zero clients
+#   attached, so nothing ever sends SIGHUP to pi.
+#
+#   Measured 2026-10-03 by simulating the cut (SIGKILL the ssh client, so no
+#   FIN — a hard cut, like closing the laptop lid):
+#     plain ssh  -> heartbeat froze, process gone
+#     in tmux    -> heartbeat kept advancing, process alive, 0 clients attached
+#
+#   Note what this does NOT do: it keeps the PROCESS alive, not the network
+#   stream. A cut mid-turn still kills the provider request. See
+#   ~/.pi/agent/session-watch/NOTES-network-cutoff.md for the timeout half.
+#
+# USAGE
+#   pi-tmux [pi args...]     attach to this directory's session, or create it
+#   pi-tmux --sessions       list tmux sessions and the pi running in each
+#   pi-tmux --attach NAME    attach to a specific session
+#   pi-tmux --kill NAME      kill a specific session (and the pi inside it)
+#   pi-tmux --close NAME     stop a session properly: end its pi, then drop its
+#                            tmux session, so it is no longer persistent. The
+#                            transcript and name history are deliberately KEPT.
+#                            NAME may be a tmux session name or a pi name/id.
+#   pi-tmux --doctor         check this host's drop-resilience setup
+#   pi-tmux --print-session-name [pi args]   show the name it would pick
+#
+#   Legacy verbs (kept so older muscle memory and scripts still work):
+#   pi-tmux start [NAME]     attach-or-create a named session
+#   pi-tmux attach [NAME]    same as --attach
+#   pi-tmux status [NAME]    prints "alive: NAME" / "dead: NAME", exit 0/1
+#
+#   After a drop: reconnect, run `pi-tmux` again from the same directory.
+#   Detach without stopping: Ctrl-b d   (pi keeps running)
+#
+#   Use `--` if a prompt legitimately starts with a verb word:
+#     pi-tmux -- status
+#
+# ENV
+#   PI_TMUX_PREFIX=pi        tmux session name prefix (default: pi)
+#   PI_TMUX_PI_BIN           pi executable to run (default: /usr/bin/pi)
+#   PI_TMUX_SESSION          default session name for the legacy verbs
+#   PI_TMUX_WORKDIR          cd here before starting (legacy `start` only)
+#   PI_TMUX_FORWARD_ENV=0    do NOT forward this shell's environment into the pane
+#   PI_TMUX_FORCE=1          allow resuming a session another live pi still owns
+#   PI_TMUX_ALLOW_FALLBACK=1 run pi WITHOUT tmux if creating the session fails.
+#                            Off by default on purpose: silently degrading to
+#                            the unprotected mode is the exact failure this
+#                            wrapper exists to prevent. Failing loudly is the
+#                            feature.
+#
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PI_BIN="${PI_TMUX_PI_BIN:-/usr/bin/pi}"
+PREFIX="${PI_TMUX_PREFIX:-pi}"
+LAUNCH_DIR="${PI_TMUX_LAUNCH_DIR:-$HOME/.pi/agent/tmux-launch}"
+PI_LIVE_BIN="${PI_LIVE_BIN:-$HOME/.pi/agent/bin/pi-live}"
+ALLOW_FALLBACK="${PI_TMUX_ALLOW_FALLBACK:-0}"
+
+die() { printf 'pi-tmux: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  sed -n '/^# USAGE$/,/^# ENV$/p' "$SELF" | sed '$d; s/^# \{0,1\}//'
+}
+
+# tmux session names must not contain . : or whitespace.
+sanitize() {
+  local s
+  s="$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')"
+  printf '%s' "${s:0:60}"
+}
+
+session_exists() { tmux has-session -t "$1" 2>/dev/null; }
+
+# First free "<base>", "<base>-2", "<base>-3", ... Used when a launch must get its
+# own session instead of reusing one that already exists.
+free_session_name() {
+  local base="$1" n=2 cand="$1"
+  while session_exists "$cand"; do cand="$base-$n"; n=$((n+1)); done
+  printf '%s' "$cand"
+}
+
+# ── inner mode ────────────────────────────────────────────────────────────────
+# Runs INSIDE the tmux pane. Both paths arrive as ARGUMENTS, never through the
+# environment, because a tmux pane inherits only the tmux server's environment
+# plus the vars in `update-environment` — any custom variable set in the
+# launching shell (PI_TMUX_LAUNCH_DIR, PI_TMUX_PI_BIN, ...) is simply absent
+# here. Reading them from env silently broke the pane (session died instantly).
+# argv reaches pi through a NUL-separated file so no quoting layer can mangle a
+# prompt containing quotes, newlines, or shell metacharacters.
+inner() {
+  local argfile="$1" binf="${2:-}"
+  [ -r "$argfile" ] || die "missing launch args: $argfile"
+
+  local -a args=()
+  while IFS= read -r -d '' a; do args+=("$a"); done < "$argfile"
+
+  local bin="$PI_BIN"
+  if [ -n "$binf" ] && [ -r "$binf" ]; then bin="$(<"$binf")"; fi
+
+  exec "$bin" ${args[@]+"${args[@]}"}
+}
+
+# ── the pane environment ──────────────────────────────────────────────────────
+# A tmux pane inherits ONLY the tmux SERVER's environment plus the vars listed in
+# `update-environment`. The server's environment is a snapshot from whenever the
+# server started — 126 days ago on this box — and it is measurably missing
+# ORCAROUTER_API_KEY, ORCAROUTER_BASE_URL and BROWSER_USE_API_KEY. A pane without
+# those starts pi fine and then its tools fail for no visible reason.
+#
+# Two approaches were tried and rejected before this one:
+#   * `bash -lc`  — does NOT work. ~/.bashrc exports the keys only for
+#                   INTERACTIVE shells, so a non-interactive login shell skips
+#                   them (verified: `bash -lc` -> empty, `bash -ic` -> present).
+#   * `bash -ic`  — works but drags a whole interactive shell (prompt, history,
+#                   aliases) in front of pi for no benefit.
+#
+# Forwarding the launching shell's environment explicitly is the honest fix: the
+# pane then gets exactly what running pi directly from that shell would have got,
+# including any one-off variable set just for this run.
+#
+# Vars that describe the LAUNCHING pi session (or the launching terminal) are NOT
+# forwarded. pi-tmux is frequently started from inside a pi session, and handing a
+# brand-new pi another session's PI_SESSION_ID / PI_SESSION_FILE / PI_MODEL would
+# give it a false identity.
+PI_TMUX_ENV_EXCLUDE='^(PI_SESSION_ID|PI_SESSION_FILE|PI_CODING_AGENT|PI_MODEL|PI_PROVIDER|PI_REASONING_LEVEL|PI_INTERCOM_SESSION_ID|PI_TMUX_MANAGED|PI_TMUX_ALLOW_FALLBACK|PI_TMUX_PROXY|AI_AGENT|TMUX|TMUX_PANE|TERM|TERM_PROGRAM|TERM_PROGRAM_VERSION)$'
+
+declare -a TMUX_ENV_ARGS=()
+build_env_args() {
+  # PI_TMUX_MANAGED marks the pane as OURS, which is what lets the session-namer
+  # extension rename this tmux session to match the pi session name.
+  #
+  # It is set here, unconditionally, rather than inherited: it does not depend on
+  # env forwarding (above), and a stale value arriving from the launching shell
+  # would let a new pi rename an unrelated tmux session.
+  TMUX_ENV_ARGS=(-e "PI_TMUX_MANAGED=1")
+  [ "${PI_TMUX_FORWARD_ENV:-1}" = 1 ] || return 0
+  local kv k
+  while IFS= read -r kv; do
+    k="${kv%%=*}"; k="${k#export }"
+    # Skip anything that is not a plain shell identifier, which also discards
+    # continuation lines from a value that contained a newline.
+    case "$k" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    if [[ "$k" =~ $PI_TMUX_ENV_EXCLUDE ]]; then continue; fi
+    case "${kv#*=}" in *$'\n'*|*$'\r'*) continue ;; esac
+    TMUX_ENV_ARGS+=(-e "$kv")
+  done < <(env)
+}
+
+# ── the pane command ──────────────────────────────────────────────────────────
+pane_command() {
+  local inner_cmd
+  inner_cmd="exec $(printf '%q' "$SELF") --inner $(printf '%q' "$1")"
+  if [ -n "${2:-}" ]; then inner_cmd="$inner_cmd $(printf '%q' "$2")"; fi
+  printf '%s' "$inner_cmd"
+}
+
+# ── pick a tmux session name ──────────────────────────────────────────────────
+# Precedence:
+#   1. an explicit --name / -n              -> that name, sanitized
+#   2. an explicit --session / --session-id -> pi-<first 8 of id>
+#      Deterministic on purpose: the same pi session id always lands in the
+#      same tmux session, so reconnecting attaches to the running instance
+#      instead of starting a second pi on one transcript. Two pi processes
+#      appending to one transcript is the corruption /recover warns about.
+#   3. otherwise -> <prefix>-<basename of cwd>: one durable workspace per
+#      directory, so plain `pi-tmux` in the same directory always reconnects.
+name_for_args() {
+  local want_name="" want_session=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name|-n)
+        if [ $# -ge 2 ]; then want_name="$2"; fi ;;
+      --name=*|-n=*)
+        want_name="${1#*=}" ;;
+      --session|--session-id)
+        if [ $# -ge 2 ]; then want_session="$2"; fi ;;
+      --session=*|--session-id=*)
+        want_session="${1#*=}" ;;
+    esac
+    shift
+  done
+
+  if [ -n "$want_name" ]; then
+    sanitize "$want_name"; return
+  fi
+  if [ -n "$want_session" ]; then
+    printf '%s-%s' "$PREFIX" "$(sanitize "${want_session:0:8}")"; return
+  fi
+
+  local base
+  base="$(basename "$PWD" 2>/dev/null || true)"
+  if [ -z "$base" ] || [ "$base" = "/" ]; then base="root"; fi
+  printf '%s-%s' "$PREFIX" "$(sanitize "$base")"
+}
+
+# ── listing ───────────────────────────────────────────────────────────────────
+# Joins tmux's pane pids against pi-live's pid->session map, so each row says
+# which pi is actually in that session and what it is doing. pi-live reads the
+# durable per-session record, so it still knows about a session whose client
+# vanished — which is the whole point after a network cut.
+# ── reading pi-live ───────────────────────────────────────────────────────────
+# Read --json through a real FILE, never a pipe or a command substitution.
+#
+# pi-live emitted at most one pipe buffer when piped (measured: exactly 65536 of
+# 166006 bytes, 29 of 85 sessions) because it called process.exit() without
+# flushing stdout. That was fixed on 2026-10-03, but this guard decides whether it
+# is safe to start a second pi on a transcript — a decision that must not depend
+# on another tool's flush discipline. File writes are synchronous, so a redirect
+# cannot truncate. A truncation here fails OPEN, which is the dangerous direction:
+# it would let a second pi append to a transcript a live pi already owns.
+pi_live_json_to() {
+  local dest="$1"
+  [ -x "$PI_LIVE_BIN" ] || return 1
+  "$PI_LIVE_BIN" --json >"$dest" 2>/dev/null || return 1
+  [ -s "$dest" ] || return 1
+}
+
+with_pi_live_json() {
+  local script="$1"; shift
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/pi-live.XXXXXX" 2>/dev/null)" || return 0
+  if pi_live_json_to "$tmp"; then
+    node -e "$script" "$@" <"$tmp" 2>/dev/null || true
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
+pi_map() {
+  with_pi_live_json '
+    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+      let j=[];try{j=JSON.parse(d)}catch(e){j=[]}
+      if(!Array.isArray(j))j=[];
+      for(const s of j){
+        const t=(s.detail||s.lastPrompt||"").replace(/[\t\n\r]/g," ").slice(0,34);
+        console.log([s.pid,s.name||"-",s.phase||"-",t,s.state||"-"].join("\t"));
+      }
+    })'
+}
+
+# ── resume guard ──────────────────────────────────────────────────────────────
+# Two pi processes appending to one transcript destroy it — that is the exact
+# incident /recover warns about and the reason tmux-resume-lichen.sh waits for the
+# old pid before resuming. After a network cut the old pi is often still alive and
+# merely stranded, so "just resume it" is the dangerous move. These helpers make
+# that refusal mechanical instead of a thing to remember.
+
+# The session id from --session / --session-id, if one is present.
+session_id_from_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session|--session-id)
+        if [ $# -ge 2 ]; then printf '%s' "$2"; return 0; fi ;;
+      --session=*|--session-id=*)
+        printf '%s' "${1#*=}"; return 0 ;;
+    esac
+    shift
+  done
+}
+
+# Which tmux session (if any) hosts this pid. Walks up the process tree, because
+# the pane's process is usually pi itself (the wrapper execs all the way through)
+# but an intervening shell must not hide it.
+tmux_session_of_pid() {
+  local pid="$1" panes hit st i=0
+  panes="$(tmux list-panes -a -F '#{session_name}|#{pane_pid}' 2>/dev/null || true)"
+  [ -n "$panes" ] || return 0
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ "$i" -lt 12 ]; do
+    hit="$(printf '%s\n' "$panes" | awk -F'|' -v p="$pid" '$2==p{print $1;exit}')"
+    if [ -n "$hit" ]; then printf '%s' "$hit"; return 0; fi
+    st="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 0
+    pid="$(printf '%s' "${st#*) }" | awk '{print $2}')"
+    i=$((i+1))
+  done
+}
+
+# Print "pid<TAB>id<TAB>name<TAB>tty<TAB>state" for a still-running pi that owns
+# a session id matching this prefix. An 'ended' session holds nothing; a dead pid
+# holds nothing. Everything else does.
+live_owner_of_session_id() {
+  local want="$1"
+  [ -n "$want" ] || return 0
+  with_pi_live_json '    const want=process.argv[1]; let d="";
+    process.stdin.on("data",c=>d+=c).on("end",()=>{
+      let j=[];try{j=JSON.parse(d)}catch(e){j=[]}
+      if(!Array.isArray(j))j=[];
+      for(const s of j){
+        if(!s.sessionId||!s.pid)continue;
+        if(!s.sessionId.startsWith(want))continue;
+        if((s.state||"")==="ended")continue;
+        let up=false;try{process.kill(s.pid,0);up=s.state!=="gone"&&true}catch(e){up=false}
+        if(!up)continue;
+        console.log([s.pid,s.sessionId,s.name||"-",s.tty||"-",s.state||"-"].join("\t"));
+      }
+    })' "$want"
+}
+
+# ── resume guard ──────────────────────────────────────────────────────────────
+# Two pi processes appending to one transcript corrupt it. That is not
+# theoretical: it is the documented incident that produced two JSON objects
+# concatenated on one line, and it is why the recovery flow warns about it.
+#
+# A network cut makes this the LIKELY case rather than an exotic one, because the
+# cut pi is still alive and merely stranded, so "just resume it" is the dangerous
+# move. This makes it mechanical.
+#
+# can_attach=1 means a real terminal is available to hand over to the running
+# instance. can_attach=0 (headless) can only refuse, since attaching needs a tty.
+#
+guard_resume() {
+  local can_attach="$1"; shift
+  [ "${PI_TMUX_FORCE:-0}" != 1 ] || return 0
+
+  local resume_id owner opid oname otty ostate host
+  resume_id="$(session_id_from_args "$@")"
+  [ -n "$resume_id" ] || return 0
+
+  owner="$(live_owner_of_session_id "$resume_id" | head -1)"
+  [ -n "$owner" ] || return 0
+  IFS=$'\t' read -r opid _ oname otty ostate <<<"$owner"
+
+  host="$(tmux_session_of_pid "$opid")"
+  if [ "$can_attach" = 1 ] && [ -n "$host" ]; then
+    printf "[pi-tmux] pi %s (%s) is already running in tmux session '%s' — attaching instead of starting a second one.\n" "$oname" "$ostate" "$host"
+    exec tmux attach -t "$host"
+  fi
+
+  printf 'pi-tmux: refusing to start a second pi on session %s.\n' "$resume_id" >&2
+  printf '         pi %s is still running: pid %s, %s, state=%s\n' "$oname" "$opid" "$otty" "$ostate" >&2
+  if [ -n "$host" ]; then
+    printf '         It is live in tmux session %s. Attach to it instead:\n            pi-tmux --attach %s\n' "$host" "$host" >&2
+  else
+    printf '         Two pi processes on one transcript corrupt it.\n' >&2
+    printf '         It is NOT in tmux, so it dies with its terminal. To take it over, end it first:\n            kill %s\n' "$opid" >&2
+  fi
+  printf '         Or override deliberately:\n            PI_TMUX_FORCE=1 ...\n' >&2
+  exit 1
+}
+
+cmd_list() {
+  local map; map="$(pi_map)"
+  printf '%-16s %-8s %-9s %-24s %s\n' SESSION ATTACH PID PI-NAME STATE
+  printf '%-16s %-8s %-9s %-24s %s\n' "────────────────" "────────" "─────────" "────────────────────────" "───────────────────"
+  local found=0
+  while IFS='|' read -r sname attached pane_pid; do
+    found=1
+    local pname="-" pstate="-" row=""
+    if [ -n "$map" ]; then
+      row="$(printf '%s\n' "$map" | awk -F'\t' -v p="$pane_pid" '$1==p{print;exit}')"
+    fi
+    if [ -n "$row" ]; then
+      pname="$(printf '%s' "$row" | cut -f2)"
+      pstate="$(printf '%s' "$row" | cut -f3)"
+    fi
+    printf '%-16s %-8s %-9s %-24s %s\n' "$sname" "$attached" "$pane_pid" "$pname" "$pstate"
+  done < <(tmux list-panes -a -F '#{session_name}|#{session_attached}|#{pane_pid}' 2>/dev/null || true)
+  if [ "$found" = 0 ]; then printf '(no tmux sessions)\n'; fi
+
+  # A pi on a bare tty is in the table above's blind spot, because the table lists
+  # TMUX sessions. That is precisely the case that matters — it is the one a
+  # network cut kills — so it is listed explicitly instead of silently omitted.
+  #
+  # /proc is checked as well as the state field: liveness is what actually
+  # decides, and a stale record must not be reported as a running session.
+  #
+  # Rows are accumulated with the newline OUTSIDE the command substitution.
+  # `$(printf '...\n')` strips the trailing newline, which silently glued every
+  # row together on the first attempt.
+  #
+  # Subagent workers are listed last rather than dropped: they are genuinely
+  # unprotected, but they are transient children of the sessions above, so they
+  # must not push the named sessions out of view.
+  local unprot="" unprot_sub="" p pname pstatus pdetail pstate row_out
+  if [ -n "$map" ]; then
+    while IFS=$'\t' read -r p pname pstatus pdetail pstate; do
+      [ -n "$p" ] || continue
+      case "$pstate" in ended|gone) continue ;; esac
+      [ -d "/proc/$p" ] || continue
+      [ -n "$(tmux_session_of_pid "$p")" ] && continue
+      row_out="$(printf '%-16s %-8s %-9s %-24s %s' "-" "-" "$p" "${pname:0:24}" "UNPROTECTED")"$'\n'
+      if [ "${pname#subagent-}" != "$pname" ]; then unprot_sub+="$row_out"; else unprot+="$row_out"; fi
+    done <<<"$map"
+  fi
+  if [ -n "$unprot" ]; then printf '%s' "$unprot"; fi
+  if [ -n "$unprot_sub" ]; then printf '%s' "$unprot_sub"; fi
+
+  printf '\nreattach:  pi-tmux --attach <SESSION>     detach:  Ctrl-b d\n'
+  if [ -n "$unprot" ] || [ -n "$unprot_sub" ]; then
+    printf 'UNPROTECTED = running outside tmux; a network cut kills it. Restart it with `pi`.\n'
+  fi
+}
+
+cmd_attach() {  local name="${1:-}"; [ -n "$name" ] || die "--attach needs a session name"
+  session_exists "$name" || { cmd_list >&2; die "no such session: $name"; }
+  exec tmux attach -t "$name"
+}
+
+cmd_kill() {
+  local name="${1:-}"; [ -n "$name" ] || die "--kill needs a session name"
+  session_exists "$name" || die "no such session: $name"
+  tmux kill-session -t "$name"
+  printf 'pi-tmux: killed tmux session %s\n' "$name"
+}
+
+# ── close ─────────────────────────────────────────────────────────────────────
+# Stop a session: end its pi, then remove its tmux session, so it stops being
+# persistent and drops off the active list.
+#
+# The transcript and name history are deliberately LEFT ALONE. Closing means "no
+# longer running", not "erased": the entire transcript archive is ~213 MB against
+# 3 GB free, so there is nothing to gain by compacting or deleting it, and
+# harness-opt learns from finished sessions — destroying them would delete the
+# exact material it optimises on.
+#
+# pi is asked to stop with SIGTERM so it exits the way a normal quit would, and
+# the tmux session is only killed outright if pi does not go on its own.
+cmd_close() {
+  local want="${1:-}" force="${PI_TMUX_FORCE:-0}"
+  [ -n "$want" ] || die "--close needs a session name (see --sessions)"
+
+  local target="$want" pane_pid="" row pid
+
+  # Not a tmux session name? Try it as a pi session NAME, then as a pi session ID.
+  if ! session_exists "$target"; then
+    target=""
+    row="$(pi_map | awk -F'\t' -v w="$want" '$2==w{print;exit}')"
+    if [ -n "$row" ]; then
+      pid="$(printf '%s' "$row" | cut -f1)"
+      target="$(tmux_session_of_pid "$pid")"
+    fi
+    if [ -z "$target" ]; then
+      row="$(live_owner_of_session_id "$want" | awk 'NR==1{print}')"
+      if [ -n "$row" ]; then
+        pid="$(printf '%s' "$row" | cut -f1)"
+        target="$(tmux_session_of_pid "$pid")"
+      fi
+    fi
+    if [ -z "$target" ]; then
+      printf 'pi-tmux: nothing running called "%s".\n' "$want" >&2
+      cmd_list >&2
+      exit 1
+    fi
+  fi
+
+  # Never close the session this command is running inside: killing the pane
+  # kills this shell too, which is essentially never what was meant.
+  if [ -n "${TMUX:-}" ]; then
+    local mine
+    mine="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+    if [ "$target" = "$mine" ] && [ "$force" != 1 ]; then
+      printf 'pi-tmux: "%s" is the session you are in.\n' "$target" >&2
+      printf '         To end it, just quit pi (/quit) — a tmux session ends with the pi inside it.\n' >&2
+      printf '         PI_TMUX_FORCE=1 overrides if you really mean it.\n' >&2
+      exit 1
+    fi
+  fi
+
+  pane_pid="$(tmux list-panes -t "$target" -F '#{pane_pid}' 2>/dev/null | awk 'NR==1{print}')"
+  [ -n "$pane_pid" ] || pane_pid="$pid"
+
+  # --close targets pi sessions. A tmux session holding something else (the
+  # python in `hermes`, say) must not be killed by a mistyped name.
+  if [ "$force" != 1 ]; then
+    if ! pi_map | awk -F'\t' -v p="$pane_pid" '$1==p{found=1} END{exit !found}'; then
+      printf 'pi-tmux: "%s" has no pi process in it — refusing to close it.\n' "$target" >&2
+      printf '         PI_TMUX_FORCE=1 overrides.\n' >&2
+      exit 1
+    fi
+  fi
+
+  printf 'pi-tmux: closing %s (pid %s)...\n' "$target" "${pane_pid:-?}"
+  if [ -n "$pane_pid" ]; then kill -TERM "$pane_pid" 2>/dev/null || true; fi
+
+  # Give pi a real chance to shut down on its own. pi drains input and disposes
+  # its runtime host before exiting, which measured over 5s on an idle session,
+  # so the window is deliberately generous — a forced kill is the fallback, not
+  # the first move.
+  local i=0
+  while [ "$i" -lt 100 ] && session_exists "$target"; do
+    sleep 0.1; i=$((i+1))
+  done
+
+  if session_exists "$target"; then
+    tmux kill-session -t "$target" 2>/dev/null || true
+    printf 'pi-tmux: %s did not exit on its own; session killed.\n' "$target"
+  fi
+  printf 'pi-tmux: %s is closed. Transcript and name history kept.\n' "$target"
+}
+
+cmd_status() {
+  local name="${1:-${PI_TMUX_SESSION:-}}"
+  if [ -z "$name" ]; then name="$(name_for_args)"; fi
+  if session_exists "$name"; then
+    printf 'alive: %s\n' "$name"; return 0
+  fi
+  printf 'dead: %s\n' "$name"; return 1
+}
+
+cmd_doctor() {
+  local fail=0 warn=0
+  say()  { printf '%-34s %s\n' "$1" "$2"; }
+  pass() { say "$1" "ok   $2"; }
+  bad()  { say "$1" "FAIL $2"; fail=1; }
+  nudge(){ say "$1" "warn $2"; warn=1; }
+
+  if command -v tmux >/dev/null 2>&1; then
+    pass "tmux" "$(tmux -V 2>/dev/null)"
+  else
+    bad "tmux" "not installed — pi-tmux cannot protect anything"
+  fi
+
+  if [ -x "$PI_BIN" ]; then pass "pi binary" "$PI_BIN"; else bad "pi binary" "not executable: $PI_BIN"; fi
+
+  # The wrapper only helps if it is what actually runs. An earlier pi-tmux sat
+  # unused on this box for five weeks, so this is worth reporting, not assuming.
+  local pires; pires="$(command -v pi 2>/dev/null || true)"
+  if [ "$pires" = "/usr/local/bin/pi" ]; then
+    pass "bare \`pi\` protected" "yes (/usr/local/bin/pi -> pi-tmux)"
+  else
+    nudge "bare \`pi\` protected" "no — \`pi\` is ${pires:-not found}; only pi-tmux is protected"
+  fi
+
+  # extended-keys is what lets pi tell Shift+Enter from Enter inside tmux.
+  # tmux reads .tmux.conf once, at server start, so a long-lived server can be
+  # running without it.
+  local ek; ek="$(tmux show-options -gv extended-keys 2>/dev/null || true)"
+  if [ "$ek" = "on" ]; then pass "tmux extended-keys" "on (Shift+Enter works)"
+  else nudge "tmux extended-keys" "${ek:-unset} — run: tmux set -g extended-keys on"; fi
+
+  if [ "${TMUX:-}" != "" ]; then pass "this session" "inside tmux ($TMUX)"
+  else bad "this session" "NOT in tmux — a network cut kills it. Restart with: pi"; fi
+
+  local ca; ca="$(sshd -T 2>/dev/null | awk 'tolower($1)=="clientaliveinterval"{print $2}')"
+  if [ -n "$ca" ] && [ "$ca" -gt 0 ] 2>/dev/null; then
+    pass "sshd ClientAliveInterval" "${ca}s (half-open cuts reaped)"
+  else
+    nudge "sshd ClientAliveInterval" "0 — half-open cuts become zombies"
+  fi
+
+  local it; it="$(node -e 'try{console.log(require(process.env.HOME+"/.pi/agent/settings.json").httpIdleTimeoutMs??"unset")}catch(e){console.log("unset")}' 2>/dev/null || echo unset)"
+  if [ "$it" = "0" ]; then
+    nudge "httpIdleTimeoutMs" "0 — a stream cut mid-turn never times out or retries"
+  else
+    pass "httpIdleTimeoutMs" "$it"
+  fi
+
+  if [ -x "$PI_LIVE_BIN" ]; then pass "pi-live (recovery)" "$PI_LIVE_BIN"
+  else nudge "pi-live (recovery)" "missing — no way to list cut sessions"; fi
+
+  printf '\n'
+  if [ "$fail" = 1 ]; then printf 'there are blocking problems (see FAIL above)\n'; return 1; fi
+  if [ "$warn" = 1 ]; then printf 'no blockers; warnings above\n'; return 0; fi
+  printf 'all clear\n'; return 0
+}
+
+# ── does this invocation want a terminal at all? ──────────────────────────────
+# The default rule is "no tty -> run pi directly", which covers pipes and
+# scripts. It does not cover a short-lived command typed AT a terminal: `pi
+# --help`, `pi update`, `pi list`. Wrapping those starts a tmux session for
+# something that exits immediately — the pane dies and takes the command's output
+# with it.
+#
+# Recognising them explicitly is the part that matters, because the tempting
+# alternative (let the session die, then re-run pi back here) would run the
+# command TWICE: harmless for --help, not harmless for `pi update`.
+#
+# Anything unrecognised is still wrapped, so a genuinely surprising short-lived
+# command fails loudly rather than running twice.
+wants_no_terminal() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --) break ;;   # everything after this is positional, not a flag
+      -p|--print|--help|-h|--version|-V|--export|--export=*|--list-models|--mode|--mode=*) return 0 ;;
+    esac
+  done
+  # pi's own subcommands: these do their thing and exit.
+  case "${1:-}" in
+    install|remove|uninstall|update|list|config|auth|mcp) return 0 ;;
+  esac
+  return 1
+}
+
+# ── the outer path ────────────────────────────────────────────────────────────
+main() {
+  # Kept before any shifting, so flag detection sees the real argv (`$@` is
+  # consumed by the dispatch below).
+  local -a orig=("$@")
+  # Dispatch only on an exact first argument. pi has --session and --name but
+  # not --sessions / --attach / --kill / --inner / --doctor, so nothing here
+  # shadows a real pi flag (--session-dir does not match --session=* either).
+  local forced_name=""
+  case "${1:-}" in
+    --inner)    shift; inner "${1:?inner needs an argfile}" "${2:-}"; return ;;
+    --sessions|--list-sessions) cmd_list; return ;;
+    --attach)   shift; cmd_attach "${1:-}"; return ;;
+    --kill)     shift; cmd_kill "${1:-}"; return ;;
+    --close)    shift; cmd_close "${1:-}"; return ;;
+    --doctor)   cmd_doctor; return ;;
+    --print-session-name)
+      # Which tmux session would this argv land in? Useful from scripts, and it
+      # is what makes the name rules testable without spawning a real session.
+      shift; name_for_args "$@"; printf '\n'; return ;;
+    --live-owner)
+      # Read-only, script-facing: which pi currently owns this sessionId, and in
+      # which tmux session? Prints, tab-separated:
+      #   pid  sessionId  name  tty  state  tmux_session
+      # or nothing if no live pi owns it. `tmux_session` is empty when the owner
+      # is not in tmux (stranded), which is a real and distinct state.
+      #
+      # `fleet` uses this as an INDEPENDENT check on its own join before it
+      # kills anything. Two joins that disagree mean one of them is wrong, and
+      # the cost of being wrong is killing a live session.
+      shift
+      while IFS=$'\t' read -r __lo_pid __lo_sid __lo_name __lo_tty __lo_state; do
+        [ -n "$__lo_pid" ] || continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$__lo_pid" "$__lo_sid" "$__lo_name" \
+          "$__lo_tty" "$__lo_state" "$(tmux_session_of_pid "$__lo_pid")"
+      done < <(live_owner_of_session_id "${1:-}")
+      return ;;
+    --help|-h)
+      # Invoked as `pi`, --help belongs to pi. Only a literal `pi-tmux --help`
+      # shows the wrapper's own usage; in proxy mode this falls through so the
+      # real pi prints its own help (and, via wants_no_terminal, does so without
+      # a tmux session).
+      if [ "${PI_TMUX_PROXY:-0}" != 1 ]; then usage; return; fi
+      ;;
+    status)
+      shift
+      case "${1:-}" in --plain) shift ;; esac
+      cmd_status "${1:-}"; return ;;
+    attach)
+      shift; cmd_attach "${1:-${PI_TMUX_SESSION:-}}"; return ;;
+    start)
+      shift
+      local wd="${PI_TMUX_WORKDIR:-}"
+      if [ -n "$wd" ]; then cd "$wd" || die "cannot cd to PI_TMUX_WORKDIR=$wd"; fi
+      # Only a bare word is a session name; anything starting with - is a pi
+      # flag and must reach pi untouched (`start --model x` must not name the
+      # session "--model").
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then forced_name="$1"; shift; fi
+      if [ -z "$forced_name" ]; then forced_name="${PI_TMUX_SESSION:-}"; fi
+      ;;
+    --)         shift ;;
+  esac
+
+  # ── resume guard, FIRST ────────────────────────────────────────────────
+  # Before EVERY passthrough, because `--print`/`-p`, `--help`, pipes and the
+  # no-tty path all exec pi directly. The guard used to sit after them, and the
+  # measured consequence was this, run for real:
+  #
+  #     pi --session <live id> -p "hi"
+  #
+  # A second pi started on a transcript a live pi already owned, appended a
+  # stray "hi" turn to it, and ran its own turn against the same file before
+  # being killed. That is the two-writers corruption case, reached through the
+  # headless door — the quietest and most scriptable route there is. A guard that
+  # anything can step around is not a guard.
+  #
+  # Cost when there is no session id to resume: one string check. The pi-live
+  # query only happens when a resume id is actually present.
+  local can_attach=0
+  if [ -t 0 ] && [ -t 1 ] && [ -z "${TMUX:-}" ]; then can_attach=1; fi
+  guard_resume "$can_attach" "$@"
+
+  # Already inside tmux: nothing to protect against, so get out of the way.
+  # This also means an inner tmux never nests a second one.
+  if [ -n "${TMUX:-}" ]; then
+    exec "$PI_BIN" "$@"
+  fi
+
+  # A short-lived or non-interactive invocation typed at a terminal is not worth
+  # a tmux session (see wants_no_terminal).
+  if wants_no_terminal "${orig[@]}"; then
+    exec "$PI_BIN" "$@"
+  fi
+
+  # No terminal: print/json/rpc modes are not interactive and cannot be attached
+  # to. Wrapping them in tmux would break their stdio, so run as-is. The resume
+  # guard has already run above.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    exec "$PI_BIN" "$@"
+  fi
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    if [ "$ALLOW_FALLBACK" = 1 ]; then
+      printf 'pi-tmux: tmux not found — running WITHOUT drop protection (PI_TMUX_ALLOW_FALLBACK=1)\n' >&2
+      exec "$PI_BIN" "$@"
+    fi
+    die "tmux not found. Install it, or run pi directly (pi-tmux will not silently drop protection)."
+  fi
+
+  local name
+  if [ -n "$forced_name" ]; then name="$(sanitize "$forced_name")"; else name="$(name_for_args "$@")"; fi
+  [ -n "$name" ] || die "could not derive a tmux session name"
+
+  # Reconnect: hand the terminal straight to the running instance. No new pi
+  # process, so two instances can never share one transcript.
+  #
+  # Except in proxy mode (`pi`), which always starts a NEW session. pi's own
+  # onboarding already asks "new session or previous session", so the tmux layer
+  # must not quietly answer that question by hijacking the launch into whatever is
+  # already running. It matters especially here: every launch from /root computes
+  # the same name, so without this the second `pi` of the day would attach to the
+  # first instead of starting anything.
+  if session_exists "$name"; then
+    if [ "${PI_TMUX_PROXY:-0}" = 1 ]; then
+      name="$(free_session_name "$name")"
+    else
+      printf "[pi-tmux] reattaching to tmux session '%s' — pi kept running while you were away.\n" "$name"
+      printf '[pi-tmux] detach: Ctrl-b d\n'
+      exec tmux attach -t "$name"
+    fi
+  fi
+
+  # Hand argv to the pane without a shell round-trip.
+  mkdir -p "$LAUNCH_DIR"; chmod 700 "$LAUNCH_DIR"
+  local argfile="$LAUNCH_DIR/$name.argv" binf="$LAUNCH_DIR/$name.bin"
+
+  # (The resume guard already ran at the top of main, before every passthrough.)
+
+  if [ $# -gt 0 ]; then
+    printf '%s\0' "$@" > "$argfile"
+  else
+    : > "$argfile"
+  fi
+  printf '%s' "$PI_BIN" > "$binf"
+
+  build_env_args
+  if ! tmux new-session -d -s "$name" ${TMUX_ENV_ARGS[@]+"${TMUX_ENV_ARGS[@]}"} "$(pane_command "$argfile" "$binf")"; then
+    if [ "$ALLOW_FALLBACK" = 1 ]; then
+      printf 'pi-tmux: tmux session creation FAILED — running WITHOUT drop protection (PI_TMUX_ALLOW_FALLBACK=1)\n' >&2
+      exec "$PI_BIN" "$@"
+    fi
+    die "failed to create tmux session '$name'. Refusing to silently fall back to an unprotected session; set PI_TMUX_ALLOW_FALLBACK=1 to override."
+  fi
+
+  # Creation can succeed and the pane still die immediately (bad PI_BIN, bad
+  # args). Catch that instead of attaching to a corpse.
+  sleep 0.4
+  if ! session_exists "$name"; then
+    die "tmux session '$name' died immediately — check PI_TMUX_PI_BIN ($PI_BIN) and the args in $argfile"
+  fi
+
+  # ── fleet enrolment (U11 P0: the third door) ──────────────────────────────
+  # pi-tmux is the door EVERY session on this box goes through, so this is the one
+  # place where an unenrolled session can still be born. A session the sentinel
+  # cannot see is a session nobody reaps: that was `gale`, and it is the whole
+  # failure mode the lineage store exists to prevent. Best-effort and detached --
+  # a failed enrol must never delay or break an interactive launch. Opt out with
+  # FLEET_AUTO_ADOPT=0.
+  if [ "${FLEET_AUTO_ADOPT:-1}" != 0 ] && [ -x /root/.pi/agent/bin/fleet ]; then
+    local _fparent="${PI_SESSION_ID:-${PI_INTERCOM_SESSION_ID:-}}"
+    (
+      for _ in $(seq 1 30); do
+        if FLEET_ENROLLED_SOURCE=pi-tmux-adopt /root/.pi/agent/bin/fleet adopt "$name" \
+             --unit "${FLEET_SPAWN_UNIT:-unenrolled: opened by pi-tmux}" \
+             ${_fparent:+--parent "$_fparent"} \
+             >>"$LAUNCH_DIR/$name.adopt.log" 2>&1; then
+          exit 0
+        fi
+        sleep 1
+      done
+      echo "adopt failed after 30s — session is live but unenrolled" \
+        >>"$LAUNCH_DIR/$name.adopt.log"
+    ) </dev/null >/dev/null 2>&1 &
+  fi
+
+  printf "[pi-tmux] started tmux session '%s' — this session now survives network drops and laptop sleep.\n" "$name"
+  printf '[pi-tmux] reconnect: pi-tmux     detach: Ctrl-b d     list: pi-tmux --sessions\n'
+  exec tmux attach -t "$name"
+}
+
+main "$@"

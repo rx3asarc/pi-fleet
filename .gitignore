@@ -1,0 +1,32 @@
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup / editor leftovers — never ship these
+*.bak
+*.bak.*
+*.orig
+*~
+*.swp
+
+# Internal test fixtures (this box's real session state) are excluded from the
+# public snapshot on purpose; see docs/SCAFFOLD-NOTES.md.
+fixtures/
+
+# Local runtime state (fleet control dir, scratch worktrees, logs)
+.fleet/
+state/
+logs/
+*.log
+
+# Environment / secrets — never committed, never shipped
+.env
+.env.*
+secrets.env
+auth.json
+
+# Local tooling
+.venv/
+venv/
+.DS_Store

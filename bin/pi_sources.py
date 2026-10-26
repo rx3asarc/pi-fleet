@@ -38,14 +38,21 @@ __all__ = [
 
 # The four sources live under ONE resolved root, not under a home directory each
 # module derives for itself. `fleet_paths` is that root: PI_AGENT_HOME moves the
-# lot, and the CLI's own directory is where the CLIs are, wherever that is.
+# lot, and the fleet CLI is the one beside us, wherever that is.
 import sys as _sys  # noqa: E402
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fleet_paths import agent_home, bin_dir  # noqa: E402
 
 REGISTRY_DIR = os.path.join(str(agent_home()), "session-names")
-PI_LIVE = os.path.join(str(bin_dir()), "pi-live")
+# THE pi-live LEDGER IS READ FROM THE AGENT HOME, NOT FROM THIS PACKAGE, and that
+# is deliberate. `pi-live` starts a node core it expects at
+# `../extensions/_lib/session-liveness-core.ts`; this package does not ship
+# `extensions/`, so the sibling copy here exits "cannot load the liveness core"
+# and every live record silently disappears (measured: 27 records -> 0). The
+# executable that owns the data is therefore the one in the agent home, until the
+# package ships the core; `PI_LIVE_BIN` names it explicitly either way.
+PI_LIVE = os.environ.get("PI_LIVE_BIN") or os.path.join(str(agent_home()), "bin", "pi-live")
 FLEET = os.path.join(str(bin_dir()), "fleet")
 SESSIONS_DIR = os.path.join(str(agent_home()), "sessions")
 

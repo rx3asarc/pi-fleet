@@ -89,5 +89,54 @@ class TestFirstUserMessage(unittest.TestCase):
         self.assertEqual(first_user_message_from_lines(gen()), "stop here")
 
 
+class TestResolvedSources(unittest.TestCase):
+    """Where the four readers point. Not purity: location.
+
+    These are the paths that used to be spelled by hand in four files. The
+    assertions are about the SEAM, so they must not pin a directory on any one
+    box -- only the rule that decides it.
+    """
+
+    def test_every_source_is_under_a_resolved_root(self):
+        import os
+
+        import fleet_paths
+        import pi_sources as ps
+
+        self.assertEqual(os.path.dirname(ps.REGISTRY_DIR), str(fleet_paths.agent_home()))
+        self.assertEqual(os.path.dirname(ps.SESSIONS_DIR), str(fleet_paths.agent_home()))
+        self.assertEqual(os.path.dirname(ps.FLEET), str(fleet_paths.bin_dir()))
+
+    def test_the_fleet_source_is_this_package_s_own_cli(self):
+        """A package must enumerate with its own `fleet`, not with whatever copy
+        happens to be installed elsewhere -- otherwise `pi-tree` and `fleet list`
+        answer from two different programs."""
+        import os
+
+        import fleet_paths
+        import pi_sources as ps
+
+        self.assertEqual(os.path.realpath(ps.FLEET),
+                         os.path.realpath(str(fleet_paths.bin_dir() / "fleet")))
+
+    def test_pi_live_is_overridable_and_defaults_to_the_agent_home(self):
+        """pi-live reads the liveness ledger, which belongs to the agent home, and
+        it needs a node core this package does not ship -- so the default is the
+        one in the agent home, and PI_LIVE_BIN moves it.
+
+        MEASURED, not assumed: pointing this at the sibling copy in bin/ made
+        pi_sources report 0 live records (27 before), because that copy cannot find
+        `../extensions/_lib/session-liveness-core.ts`.
+        """
+        import os
+
+        import fleet_paths
+        import pi_sources as ps
+
+        expected = os.environ.get("PI_LIVE_BIN") or os.path.join(
+            str(fleet_paths.agent_home()), "bin", "pi-live")
+        self.assertEqual(ps.PI_LIVE, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
